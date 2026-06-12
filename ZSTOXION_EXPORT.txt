@@ -1,0 +1,673 @@
+*&---------------------------------------------------------------------*
+*& Report  ZSTOXION_EXPORT
+*&---------------------------------------------------------------------*
+*& Zweck   : Template-konformer Datenexport fuer die stoxion
+*&           Safety-Stock-Optimierung (Pilot Ansmann AG).
+*&           Erzeugt je SAP-Tabelle eine Tab-getrennte Textdatei mit
+*&           zwei Kopfzeilen (Bezeichnung + technischer Feldname),
+*&           identisch zur Reiterstruktur des Excel-Templates
+*&           "Soll-Sicherheitsbestand_Template.xlsx".
+*&
+*& Reiter   : T001, T001W, T006, T134, V438A, V_399D_E,
+*&            MARA, MATDOC, MARC, MBEW
+*&
+*& Version 2 - Aenderungen ggue. v1:
+*&   - Mehrere Werke je Lauf (S_WERKS), alle in einem Dateisatz
+*&   - Neue Filter: Material, Materialart, Warengruppe, Dispomerkmal,
+*&     ABC-Kennzeichen, Sonderbestandskennzeichen (nur Filter, keine
+*&     neuen Spalten -> Template bleibt unveraendert)
+*&   - Top-N entfernt (Auswahl erfolgt in stoxion)
+*&   - S/4-Weiche entfernt: immer MSEG+MKPF. Auf S/4HANA ist MSEG ein
+*&     Compatibility View auf MATDOC -> identische Daten, ein Codepfad
+*&   - Bewegungsdaten paketiert (Material-Chunks) -> konstanter
+*&     Speicherbedarf, im Server-Modus streamend geschrieben
+*&   - Hintergrundjob-Button auf dem Selektionsbild (erzwingt
+*&     Server-Export), Batch-Schutz bei sy-batch
+*&   - AUTHORITY-CHECKs: M_MATE_WRK je Werk, S_DATASET vor OPEN DATASET
+*&   - MARM-Filter als DB-Join statt Doppel-Loop
+*&
+*& Release  : Min. NW 7.40 (Inline-Deklarationen).
+*&            Lauffaehig auf ECC 6.0 und S/4HANA.
+*&
+*& Hinweis  : Als lokales Objekt ($TMP) anlegbar -> KEIN Transport noetig.
+*&            Empfehlung fuer Voll-Export: Button "Hintergrundjob
+*&            einplanen" verwenden; Dateien danach aus AL11 abholen
+*&            (z.B. via CG3Y).
+*&            Datenschutz: Es werden KEINE personenbezogenen Daten
+*&            exportiert (kein Benutzername aus MKPF o.ae.).
+*&
+*& Hard-Filter (per Checkbox, default aktiv):
+*&   - Material/Werk-Kombinationen mit Dispobereich (MDMA) entfernt
+*&   - Materialien mit alternativen Mengeneinheiten (MARM-Satz mit
+*&     MEINH <> Basis-ME) komplett entfernt
+*&
+*& Formatkontrakt (stoxion-Parser):
+*&   - Tab-getrennt, UTF-8, 2 Kopfzeilen
+*&   - Datum roh als JJJJMMTT, Mengen/Preise mit '.' als Dezimaltrenner,
+*&     MATNR mit fuehrenden Nullen
+*&   - Dateien NICHT mit Excel oeffnen und neu speichern!
+*&---------------------------------------------------------------------*
+REPORT zstoxion_export.
+
+TABLES: mara, marc, mseg, mkpf, sscrfields.
+TYPE-POOLS: sabc.
+
+CONSTANTS: gc_tab   TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
+           gc_chunk TYPE i VALUE 1000.   "Materialien je Bewegungs-Paket
+
+*----------------------------------------------------------------------*
+* Selektionsbildschirm
+*----------------------------------------------------------------------*
+SELECTION-SCREEN FUNCTION KEY 1.                "Job-Button
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+  SELECT-OPTIONS: s_werks FOR marc-werks OBLIGATORY,   "Werk(e)
+                  s_matnr FOR mara-matnr,              "Material
+                  s_mtart FOR mara-mtart,              "Materialart
+                  s_matkl FOR mara-matkl,              "Warengruppe
+                  s_dismm FOR marc-dismm,              "Dispomerkmal
+                  s_maabc FOR marc-maabc.              "ABC-Kennzeichen
+SELECTION-SCREEN END OF BLOCK b1.
+
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-002.
+  SELECT-OPTIONS: s_budat FOR mkpf-budat,              "Buchungsdatum
+                  s_bwart FOR mseg-bwart,              "Bewegungsart (opt.)
+                  s_sobkz FOR mseg-sobkz.              "Sonderbestand (opt.)
+SELECTION-SCREEN END OF BLOCK b2.
+
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-003.
+  PARAMETERS: p_fmrp AS CHECKBOX DEFAULT 'X',          "Filter Dispobereich
+              p_fuom AS CHECKBOX DEFAULT 'X'.          "Filter alt. ME
+SELECTION-SCREEN END OF BLOCK b3.
+
+SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-004.
+  PARAMETERS: p_front RADIOBUTTON GROUP rb DEFAULT 'X', "Frontend-Download
+              p_serv  RADIOBUTTON GROUP rb.             "Applikationsserver
+  PARAMETERS: p_path  TYPE string LOWER CASE
+                      DEFAULT 'C:\stoxion\'.            "Zielordner / AL11-Pfad
+SELECTION-SCREEN END OF BLOCK b4.
+
+*----------------------------------------------------------------------*
+* Globale Typen / Daten
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_plant,
+         werks TYPE t001w-werks,
+         bwkey TYPE t001w-bwkey,
+         bukrs TYPE t001-bukrs,
+         waers TYPE t001-waers,
+       END OF ty_plant,
+       BEGIN OF ty_marc,
+         matnr TYPE marc-matnr,
+         werks TYPE marc-werks,
+         bwkey TYPE t001w-bwkey,
+         lvorm TYPE marc-lvorm,
+         dismm TYPE marc-dismm,
+         eisbe TYPE marc-eisbe,
+         plifz TYPE marc-plifz,
+         webaz TYPE marc-webaz,
+         pstat TYPE marc-pstat,
+         maabc TYPE marc-maabc,
+         wzeit TYPE marc-wzeit,
+         mtart TYPE mara-mtart,
+         meins TYPE mara-meins,
+       END OF ty_marc,
+       BEGIN OF ty_mara,
+         matnr TYPE mara-matnr,
+         mtart TYPE mara-mtart,
+         lvorm TYPE mara-lvorm,
+         meins TYPE mara-meins,
+       END OF ty_mara,
+       BEGIN OF ty_mov,
+         matnr TYPE matnr,
+         werks TYPE werks_d,
+         bwart TYPE bwart,
+         shkzg TYPE shkzg,
+         menge TYPE menge_d,
+         budat TYPE budat,
+         mjahr TYPE mjahr,
+         mblnr TYPE mblnr,
+         zeile TYPE mblpo,
+         sjahr TYPE gjahr,
+         smbln TYPE smbln,
+         smblp TYPE smblp,
+       END OF ty_mov.
+
+DATA: gt_plants TYPE STANDARD TABLE OF ty_plant,
+      gt_marc   TYPE STANDARD TABLE OF ty_marc,
+      gt_mara   TYPE STANDARD TABLE OF ty_mara,
+      gt_lines  TYPE STANDARD TABLE OF string.
+
+" Sheet-Writer-Status (Abstraktion Frontend-Puffer vs. Server-Stream)
+DATA: gv_sh_file   TYPE string,
+      gv_sh_isopen TYPE abap_bool,
+      gt_sh_buffer TYPE STANDARD TABLE OF string.
+
+*----------------------------------------------------------------------*
+INITIALIZATION.
+*----------------------------------------------------------------------*
+  sscrfields-functxt_01 = 'Hintergrundjob einplanen'.
+
+*----------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+*----------------------------------------------------------------------*
+  IF sscrfields-ucomm = 'FC01'.
+    PERFORM schedule_job.
+  ENDIF.
+
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+*----------------------------------------------------------------------*
+
+* --- Batch-Schutz: GUI_DOWNLOAD geht im Hintergrund nicht -------------
+  IF sy-batch = 'X' AND p_front = 'X'.
+    p_front = space.
+    p_serv  = 'X'.
+    MESSAGE 'Hintergrundlauf: Ausgabe auf Server-Export umgestellt.'
+      TYPE 'S'.
+  ENDIF.
+
+* --- 0) Werke aufloesen, Berechtigungen, Org-Daten --------------------
+  SELECT werks, bwkey FROM t001w
+    INTO CORRESPONDING FIELDS OF TABLE @gt_plants
+    WHERE werks IN @s_werks.
+  IF gt_plants IS INITIAL.
+    MESSAGE 'Kein Werk zur Selektion gefunden.' TYPE 'E'.
+  ENDIF.
+
+  LOOP AT gt_plants ASSIGNING FIELD-SYMBOL(<ls_plant>).
+    AUTHORITY-CHECK OBJECT 'M_MATE_WRK'
+      ID 'ACTVT' FIELD '03'
+      ID 'WERKS' FIELD <ls_plant>-werks.
+    IF sy-subrc <> 0.
+      MESSAGE |Keine Berechtigung fuer Werk { <ls_plant>-werks }.|
+        TYPE 'E'.
+    ENDIF.
+
+    SELECT SINGLE bukrs FROM t001k
+      INTO @<ls_plant>-bukrs
+      WHERE bwkey = @<ls_plant>-bwkey.
+    IF sy-subrc <> 0.
+      MESSAGE |Kein Buchungskreis zu Werk { <ls_plant>-werks }.| TYPE 'E'.
+    ENDIF.
+    SELECT SINGLE waers FROM t001
+      INTO @<ls_plant>-waers
+      WHERE bukrs = @<ls_plant>-bukrs.
+    IF sy-subrc <> 0.
+      MESSAGE |Buchungskreis { <ls_plant>-bukrs } nicht gefunden.|
+        TYPE 'E'.
+    ENDIF.
+  ENDLOOP.
+  SORT gt_plants BY werks.
+
+* --- 1) Kandidaten: MARC + MARA mit allen Filtern in einem Join -------
+  SELECT c~matnr, c~werks, c~lvorm, c~dismm, c~eisbe, c~plifz,
+         c~webaz, c~pstat, c~maabc, c~wzeit,
+         a~mtart, a~meins
+    FROM marc AS c
+    INNER JOIN mara AS a ON a~matnr = c~matnr
+    INTO CORRESPONDING FIELDS OF TABLE @gt_marc
+    WHERE c~werks IN @s_werks
+      AND c~matnr IN @s_matnr
+      AND c~lvorm =  @space
+      AND c~dismm IN @s_dismm
+      AND c~maabc IN @s_maabc
+      AND a~mtart IN @s_mtart
+      AND a~matkl IN @s_matkl
+      AND a~lvorm =  @space.
+  IF gt_marc IS INITIAL.
+    MESSAGE 'Keine Materialien zur Selektion gefunden.' TYPE 'E'.
+  ENDIF.
+
+  " Bewertungskreis je Zeile ergaenzen (fuer MBEW-Zugriff)
+  LOOP AT gt_marc ASSIGNING FIELD-SYMBOL(<ls_marc>).
+    READ TABLE gt_plants ASSIGNING <ls_plant>
+      WITH KEY werks = <ls_marc>-werks BINARY SEARCH.
+    IF sy-subrc = 0.
+      <ls_marc>-bwkey = <ls_plant>-bwkey.
+    ENDIF.
+  ENDLOOP.
+
+* --- 2) Hard-Filter: Dispobereich (MDMA, je Material/Werk) ------------
+  IF p_fmrp = 'X'.
+    SELECT matnr, werks FROM mdma
+      INTO TABLE @DATA(lt_mdma)
+      FOR ALL ENTRIES IN @gt_marc
+      WHERE matnr = @gt_marc-matnr
+        AND werks = @gt_marc-werks.
+    SORT lt_mdma BY matnr werks.
+    DELETE ADJACENT DUPLICATES FROM lt_mdma COMPARING matnr werks.
+    LOOP AT gt_marc ASSIGNING <ls_marc>.
+      READ TABLE lt_mdma TRANSPORTING NO FIELDS
+        WITH KEY matnr = <ls_marc>-matnr
+                 werks = <ls_marc>-werks BINARY SEARCH.
+      IF sy-subrc = 0.
+        CLEAR <ls_marc>-matnr.          "markieren zum Loeschen
+      ENDIF.
+    ENDLOOP.
+    DELETE gt_marc WHERE matnr IS INITIAL.
+    IF gt_marc IS INITIAL.
+      MESSAGE 'Nach Dispobereich-Filter keine Materialien uebrig.'
+        TYPE 'E'.
+    ENDIF.
+  ENDIF.
+
+* --- 3) Hard-Filter: alternative Mengeneinheiten (DB-Join) ------------
+  IF p_fuom = 'X'.
+    SELECT DISTINCT m~matnr
+      FROM marm AS m
+      INNER JOIN mara AS a ON a~matnr = m~matnr
+      INTO TABLE @DATA(lt_altuom)
+      FOR ALL ENTRIES IN @gt_marc
+      WHERE m~matnr =  @gt_marc-matnr
+        AND m~meinh <> a~meins.
+    SORT lt_altuom.
+    LOOP AT gt_marc ASSIGNING <ls_marc>.
+      READ TABLE lt_altuom TRANSPORTING NO FIELDS
+        WITH KEY table_line = <ls_marc>-matnr BINARY SEARCH.
+      IF sy-subrc = 0.
+        CLEAR <ls_marc>-matnr.
+      ENDIF.
+    ENDLOOP.
+    DELETE gt_marc WHERE matnr IS INITIAL.
+    IF gt_marc IS INITIAL.
+      MESSAGE 'Nach Mengeneinheiten-Filter keine Materialien uebrig.'
+        TYPE 'E'.
+    ENDIF.
+  ENDIF.
+
+  SORT gt_marc BY matnr werks.
+
+* --- 4) MARA-Liste (eindeutige Materialien) ---------------------------
+  LOOP AT gt_marc ASSIGNING <ls_marc>.
+    APPEND VALUE ty_mara( matnr = <ls_marc>-matnr
+                          mtart = <ls_marc>-mtart
+                          lvorm = space
+                          meins = <ls_marc>-meins ) TO gt_mara.
+  ENDLOOP.
+  SORT gt_mara BY matnr.
+  DELETE ADJACENT DUPLICATES FROM gt_mara COMPARING matnr.
+
+* --- 5) MBEW (je Material + Bewertungskreis) --------------------------
+  SELECT matnr, bwkey, vprsv, stprs, verpr, peinh, lvorm
+    FROM mbew
+    INTO TABLE @DATA(lt_mbew)
+    FOR ALL ENTRIES IN @gt_marc
+    WHERE matnr = @gt_marc-matnr
+      AND bwkey = @gt_marc-bwkey.
+  SORT lt_mbew BY matnr bwkey.
+  DELETE ADJACENT DUPLICATES FROM lt_mbew COMPARING matnr bwkey.
+
+* --- 6) Customizing-/Konfig-Tabellen ----------------------------------
+  SELECT msehi, decan FROM t006 INTO TABLE @DATA(lt_t006).
+  SELECT mtart FROM t134 INTO TABLE @DATA(lt_t134).
+  SELECT dismm, disvf FROM t438a INTO TABLE @DATA(lt_t438a).
+  SELECT werks, bztek FROM t399d
+    INTO TABLE @DATA(lt_t399d)
+    WHERE werks IN @s_werks.
+  SORT lt_t399d BY werks.
+
+*----------------------------------------------------------------------*
+* 7) Ausgabe je Reiter erzeugen
+*----------------------------------------------------------------------*
+
+* --- T001 (eindeutige Buchungskreise) ---------------------------------
+  CLEAR gt_lines.
+  APPEND |Buchungskreis{ gc_tab }Waehrung| TO gt_lines.
+  APPEND |BUKRS{ gc_tab }WAERS|            TO gt_lines.
+  DATA(lt_bukrs) = gt_plants.
+  SORT lt_bukrs BY bukrs.
+  DELETE ADJACENT DUPLICATES FROM lt_bukrs COMPARING bukrs.
+  LOOP AT lt_bukrs ASSIGNING <ls_plant>.
+    APPEND |{ <ls_plant>-bukrs }{ gc_tab }{ <ls_plant>-waers }|
+      TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T001' gt_lines.
+
+* --- T001W (je Werk) ---------------------------------------------------
+  CLEAR gt_lines.
+  APPEND |Werk{ gc_tab }Bewertungskreis| TO gt_lines.
+  APPEND |WERKS{ gc_tab }BWKEY|          TO gt_lines.
+  LOOP AT gt_plants ASSIGNING <ls_plant>.
+    APPEND |{ <ls_plant>-werks }{ gc_tab }{ <ls_plant>-bwkey }|
+      TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T001W' gt_lines.
+
+* --- T006 ---
+  CLEAR gt_lines.
+  APPEND |Masseinheit{ gc_tab }Anzahl Dezimalstellen| TO gt_lines.
+  APPEND |MSEHI{ gc_tab }DECAN|                        TO gt_lines.
+  LOOP AT lt_t006 ASSIGNING FIELD-SYMBOL(<ls_t006>).
+    APPEND |{ <ls_t006>-msehi }{ gc_tab }{ <ls_t006>-decan }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T006' gt_lines.
+
+* --- T134 ---
+* Hinweis: PROD_TYPE_CODE wird nur fuer Standard-Service-Materialarten
+* (SERV/DIEN) abgeleitet. Kundeneigene Z-Materialarten fuer Dienst-
+* leistungen ggf. hier ergaenzen.
+  CLEAR gt_lines.
+  APPEND |Materialart{ gc_tab }Produkttyp (Material / Service / Subscription)| TO gt_lines.
+  APPEND |MTART{ gc_tab }PROD_TYPE_CODE| TO gt_lines.
+  LOOP AT lt_t134 ASSIGNING FIELD-SYMBOL(<ls_t134>).
+    DATA(lv_prod) = COND string(
+      WHEN <ls_t134>-mtart = 'SERV' OR <ls_t134>-mtart = 'DIEN'
+      THEN '2' ELSE '' ).
+    APPEND |{ <ls_t134>-mtart }{ gc_tab }{ lv_prod }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T134' gt_lines.
+
+* --- V438A ---
+  CLEAR gt_lines.
+  APPEND |Dispositionsverfahren{ gc_tab }Dispositionskennzeichen (aus DISMM abgeleitet)| TO gt_lines.
+  APPEND |DISMM{ gc_tab }DISVF| TO gt_lines.
+  LOOP AT lt_t438a ASSIGNING FIELD-SYMBOL(<ls_t438a>).
+    APPEND |{ <ls_t438a>-dismm }{ gc_tab }{ <ls_t438a>-disvf }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'V438A' gt_lines.
+
+* --- V_399D_E (je Werk) ------------------------------------------------
+  CLEAR gt_lines.
+  APPEND |Werk{ gc_tab }Einkaufsbearbeitungszeit (Werktage)| TO gt_lines.
+  APPEND |WERKS{ gc_tab }BZTEK| TO gt_lines.
+  LOOP AT lt_t399d ASSIGNING FIELD-SYMBOL(<ls_t399d>).
+    APPEND |{ <ls_t399d>-werks }{ gc_tab }{ <ls_t399d>-bztek }|
+      TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'V_399D_E' gt_lines.
+
+* --- MARA ---
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Materialart{ gc_tab }Loeschvormerkung{ gc_tab }Basismengeneinheit| TO gt_lines.
+  APPEND |MATNR{ gc_tab }MTART{ gc_tab }LVORM{ gc_tab }MEINS| TO gt_lines.
+  LOOP AT gt_mara ASSIGNING FIELD-SYMBOL(<ls_mara>).
+    APPEND |{ <ls_mara>-matnr }{ gc_tab }{ <ls_mara>-mtart }{ gc_tab }| &&
+           |{ <ls_mara>-lvorm }{ gc_tab }{ <ls_mara>-meins }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MARA' gt_lines.
+
+* --- MARC ---
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Loeschvormerkung{ gc_tab }| &&
+         |Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
+         |Planlieferzeit (Kalendertage){ gc_tab }Wareneingangsbearbeitungszeit (Werktage){ gc_tab }| &&
+         |Pflegestatus (D/E/L){ gc_tab }ABC-Indikator{ gc_tab }Wiederbeschaffungszeit (optional)| TO gt_lines.
+  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
+         |PLIFZ{ gc_tab }WEBAZ{ gc_tab }PSTAT{ gc_tab }MAABC{ gc_tab }WZEIT| TO gt_lines.
+  LOOP AT gt_marc ASSIGNING <ls_marc>.
+    APPEND |{ <ls_marc>-matnr }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
+           |{ <ls_marc>-lvorm }{ gc_tab }{ <ls_marc>-dismm }{ gc_tab }| &&
+           |{ <ls_marc>-eisbe }{ gc_tab }{ <ls_marc>-plifz }{ gc_tab }| &&
+           |{ <ls_marc>-webaz }{ gc_tab }{ <ls_marc>-pstat }{ gc_tab }| &&
+           |{ <ls_marc>-maabc }{ gc_tab }{ <ls_marc>-wzeit }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MARC' gt_lines.
+
+* --- MBEW ---
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Bewertungskreis{ gc_tab }Preissteuerung{ gc_tab }| &&
+         |Standardpreis{ gc_tab }Gleitender Durchschnittspreis{ gc_tab }| &&
+         |Preiseinheit{ gc_tab }Loeschvormerkung| TO gt_lines.
+  APPEND |MATNR{ gc_tab }BWKEY{ gc_tab }VPRSV{ gc_tab }STPRS{ gc_tab }| &&
+         |VERPR{ gc_tab }PEINH{ gc_tab }LVORM| TO gt_lines.
+  LOOP AT lt_mbew ASSIGNING FIELD-SYMBOL(<ls_mbew>).
+    APPEND |{ <ls_mbew>-matnr }{ gc_tab }{ <ls_mbew>-bwkey }{ gc_tab }| &&
+           |{ <ls_mbew>-vprsv }{ gc_tab }{ <ls_mbew>-stprs }{ gc_tab }| &&
+           |{ <ls_mbew>-verpr }{ gc_tab }{ <ls_mbew>-peinh }{ gc_tab }| &&
+           |{ <ls_mbew>-lvorm }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MBEW' gt_lines.
+
+* --- MATDOC: Bewegungsdaten paketiert / streamend ----------------------
+* Bewusst inkl. Stornoreferenzen (SJAHR/SMBLN/SMBLP): die Storno-
+* Bereinigung erfolgt in stoxion, daher hier roh exportieren.
+  PERFORM sheet_open USING 'MATDOC'.
+
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Bewegungsart{ gc_tab }| &&
+         |Soll-/Haben-Kennzeichen{ gc_tab }Menge{ gc_tab }Buchungsdatum{ gc_tab }| &&
+         |Materialbelegjahr{ gc_tab }Materialbelegnummer{ gc_tab }Belegzeile{ gc_tab }| &&
+         |Stornojahr{ gc_tab }Stornobeleg{ gc_tab }Stornozeile| TO gt_lines.
+  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }BWART{ gc_tab }SHKZG{ gc_tab }MENGE{ gc_tab }| &&
+         |BUDAT{ gc_tab }MJAHR{ gc_tab }MBLNR{ gc_tab }ZEILE{ gc_tab }| &&
+         |SJAHR{ gc_tab }SMBLN{ gc_tab }SMBLP| TO gt_lines.
+  PERFORM sheet_put USING gt_lines.
+
+  DATA: lt_chunk TYPE STANDARD TABLE OF ty_mara,
+        lt_mov   TYPE STANDARD TABLE OF ty_mov,
+        lv_total TYPE i.
+
+  DATA(lv_from) = 1.
+  WHILE lv_from <= lines( gt_mara ).
+    CLEAR lt_chunk.
+    LOOP AT gt_mara ASSIGNING <ls_mara>
+         FROM lv_from TO lv_from + gc_chunk - 1.
+      APPEND <ls_mara> TO lt_chunk.
+    ENDLOOP.
+    lv_from = lv_from + gc_chunk.
+    IF lt_chunk IS INITIAL.
+      EXIT.
+    ENDIF.
+
+    CLEAR lt_mov.
+    SELECT m~matnr, m~werks, m~bwart, m~shkzg, m~menge,
+           k~budat, m~mjahr, m~mblnr, m~zeile,
+           m~sjahr, m~smbln, m~smblp
+      FROM mseg AS m
+      INNER JOIN mkpf AS k
+        ON  k~mblnr = m~mblnr
+        AND k~mjahr = m~mjahr
+      INTO CORRESPONDING FIELDS OF TABLE @lt_mov
+      FOR ALL ENTRIES IN @lt_chunk
+      WHERE m~matnr =  @lt_chunk-matnr
+        AND m~werks IN @s_werks
+        AND m~sobkz IN @s_sobkz
+        AND m~bwart IN @s_bwart
+        AND k~budat IN @s_budat.
+
+    SORT lt_mov BY matnr werks budat mblnr zeile.
+    lv_total = lv_total + lines( lt_mov ).
+
+    CLEAR gt_lines.
+    LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov>).
+      APPEND |{ <ls_mov>-matnr }{ gc_tab }{ <ls_mov>-werks }{ gc_tab }| &&
+             |{ <ls_mov>-bwart }{ gc_tab }{ <ls_mov>-shkzg }{ gc_tab }| &&
+             |{ <ls_mov>-menge }{ gc_tab }{ <ls_mov>-budat }{ gc_tab }| &&
+             |{ <ls_mov>-mjahr }{ gc_tab }{ <ls_mov>-mblnr }{ gc_tab }| &&
+             |{ <ls_mov>-zeile }{ gc_tab }{ <ls_mov>-sjahr }{ gc_tab }| &&
+             |{ <ls_mov>-smbln }{ gc_tab }{ <ls_mov>-smblp }| TO gt_lines.
+    ENDLOOP.
+    PERFORM sheet_put USING gt_lines.
+  ENDWHILE.
+
+  PERFORM sheet_close.
+
+  MESSAGE |Export abgeschlossen. { lines( gt_marc ) } Material/Werk-| &&
+          |Kombinationen, { lv_total } Bewegungen.| TYPE 'S'.
+
+*&---------------------------------------------------------------------*
+*& Sheet-Writer: Frontend puffert komplett, Server schreibt streamend
+*&---------------------------------------------------------------------*
+FORM sheet_open USING iv_name TYPE string.
+
+  PERFORM build_filename USING iv_name CHANGING gv_sh_file.
+  gv_sh_isopen = abap_false.
+  CLEAR gt_sh_buffer.
+
+  IF p_serv = 'X'.
+    CALL FUNCTION 'AUTHORITY_CHECK_DATASET'
+      EXPORTING
+        activity         = sabc_act_write
+        filename         = gv_sh_file
+      EXCEPTIONS
+        no_authority     = 1
+        activity_unknown = 2
+        OTHERS           = 3.
+    IF sy-subrc <> 0.
+      MESSAGE |Keine Schreibberechtigung fuer { gv_sh_file }.| TYPE 'E'.
+    ENDIF.
+    OPEN DATASET gv_sh_file FOR OUTPUT IN TEXT MODE ENCODING UTF-8.
+    IF sy-subrc <> 0.
+      MESSAGE |Datei { gv_sh_file } nicht oeffenbar.| TYPE 'E'.
+    ENDIF.
+  ENDIF.
+  gv_sh_isopen = abap_true.
+
+ENDFORM.
+
+FORM sheet_put USING it_lines TYPE STANDARD TABLE.
+
+  FIELD-SYMBOLS: <lv_line> TYPE string.
+
+  IF p_serv = 'X'.
+    LOOP AT it_lines ASSIGNING <lv_line>.
+      TRANSFER <lv_line> TO gv_sh_file.
+    ENDLOOP.
+  ELSE.
+    APPEND LINES OF it_lines TO gt_sh_buffer.
+  ENDIF.
+
+ENDFORM.
+
+FORM sheet_close.
+
+  IF gv_sh_isopen = abap_false.
+    RETURN.
+  ENDIF.
+
+  IF p_serv = 'X'.
+    CLOSE DATASET gv_sh_file.
+  ELSE.
+    cl_gui_frontend_services=>gui_download(
+      EXPORTING
+        filename              = gv_sh_file
+        filetype              = 'ASC'
+        codepage              = '4110'        "UTF-8
+        write_field_separator = space
+      CHANGING
+        data_tab              = gt_sh_buffer
+      EXCEPTIONS
+        OTHERS                = 1 ).
+    IF sy-subrc <> 0.
+      MESSAGE |Download { gv_sh_file } fehlgeschlagen (rc={ sy-subrc }).|
+        TYPE 'W'.
+    ENDIF.
+    CLEAR gt_sh_buffer.
+  ENDIF.
+  gv_sh_isopen = abap_false.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM write_sheet - komplette Reiter-Datei in einem Zug
+*&---------------------------------------------------------------------*
+FORM write_sheet USING iv_name  TYPE string
+                       it_lines TYPE STANDARD TABLE.
+
+  PERFORM sheet_open  USING iv_name.
+  PERFORM sheet_put   USING it_lines.
+  PERFORM sheet_close.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_filename - Zielpfad + Dateiname zusammensetzen
+*&---------------------------------------------------------------------*
+FORM build_filename USING iv_name TYPE string
+                 CHANGING cv_file TYPE string.
+
+  DATA(lv_sep) = COND string( WHEN p_front = 'X' THEN '\' ELSE '/' ).
+
+  cv_file = p_path.
+  IF cv_file IS INITIAL.
+    MESSAGE 'Bitte Zielpfad angeben.' TYPE 'E'.
+  ENDIF.
+
+  DATA(lv_len) = strlen( cv_file ) - 1.
+  IF cv_file+lv_len(1) <> lv_sep.
+    cv_file = cv_file && lv_sep.
+  ENDIF.
+  cv_file = |{ cv_file }{ iv_name }.txt|.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM schedule_job - aktuellen Selektionsstand als Job einplanen
+*&---------------------------------------------------------------------*
+FORM schedule_job.
+
+  DATA: lt_par      TYPE TABLE OF rsparams,
+        lv_jobname  TYPE tbtcjob-jobname,
+        lv_jobcount TYPE tbtcjob-jobcount.
+
+  " Aktuelle Selektionswerte einsammeln
+  CALL FUNCTION 'RS_REFRESH_FROM_SELECTOPTIONS'
+    EXPORTING
+      curr_report     = sy-repid
+    TABLES
+      selection_table = lt_par
+    EXCEPTIONS
+      OTHERS          = 1.
+  IF sy-subrc <> 0.
+    MESSAGE 'Selektionswerte konnten nicht gelesen werden.' TYPE 'E'.
+  ENDIF.
+
+  " Im Job zwingend Server-Export
+  LOOP AT lt_par ASSIGNING FIELD-SYMBOL(<ls_par>).
+    CASE <ls_par>-selname.
+      WHEN 'P_FRONT'. <ls_par>-low = space.
+      WHEN 'P_SERV'.  <ls_par>-low = 'X'.
+    ENDCASE.
+  ENDLOOP.
+
+  " Plausibilitaet: Pfad sollte ein Server-Pfad sein
+  IF p_path CS ':\' OR p_path CS ':/'.
+    MESSAGE 'Hinweis: Fuer den Job einen Server-Pfad (AL11) angeben, ' &&
+            'z.B. /tmp/stoxion/ - aktueller Pfad sieht nach lokalem ' &&
+            'Laufwerk aus.' TYPE 'E'.
+  ENDIF.
+
+  lv_jobname = |ZSTOXION_{ sy-datum }_{ sy-uzeit }|.
+
+  CALL FUNCTION 'JOB_OPEN'
+    EXPORTING
+      jobname          = lv_jobname
+    IMPORTING
+      jobcount         = lv_jobcount
+    EXCEPTIONS
+      cant_create_job  = 1
+      invalid_job_data = 2
+      jobname_missing  = 3
+      OTHERS           = 4.
+  IF sy-subrc <> 0.
+    MESSAGE 'Job konnte nicht angelegt werden.' TYPE 'E'.
+  ENDIF.
+
+  SUBMIT (sy-repid)
+    WITH SELECTION-TABLE lt_par
+    VIA JOB lv_jobname NUMBER lv_jobcount
+    AND RETURN.
+
+  CALL FUNCTION 'JOB_CLOSE'
+    EXPORTING
+      jobname              = lv_jobname
+      jobcount             = lv_jobcount
+      strtimmed            = 'X'                "Sofortstart
+    EXCEPTIONS
+      cant_start_immediate = 1
+      invalid_startdate    = 2
+      jobname_missing      = 3
+      job_close_failed     = 4
+      job_nosteps          = 5
+      job_notex            = 6
+      lock_failed          = 7
+      OTHERS               = 8.
+  IF sy-subrc <> 0.
+    MESSAGE 'Job konnte nicht freigegeben werden (SM37 pruefen).'
+      TYPE 'E'.
+  ENDIF.
+
+  MESSAGE |Job { lv_jobname } eingeplant (Sofortstart). | &&
+          |Ueberwachung in SM37, Dateien danach in AL11.| TYPE 'S'.
+
+ENDFORM.
