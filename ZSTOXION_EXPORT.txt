@@ -238,28 +238,55 @@ DATA: go_result_zip     TYPE REF TO cl_abap_zip,
 *----------------------------------------------------------------------*
 INITIALIZATION.
 *----------------------------------------------------------------------*
-  sscrfields-functxt_01 = 'Job einplanen / Schedule job'.
+  CASE sy-langu.
+    WHEN 'D'.
+      sscrfields-functxt_01 = 'Job einplanen'.
 
-  gv_t_org = 'Organisation und Material / Organization and material'.
-  gv_t_mov = 'Bewegungsdaten / Movement data'.
-  gv_t_flt = 'Ausschlussfilter / Exclusion filters'.
-  gv_t_tgt = 'Exportziel / Export target'.
+      gv_t_org = 'Organisation und Material'.
+      gv_t_mov = 'Bewegungsdaten'.
+      gv_t_flt = 'Ausschlussfilter'.
+      gv_t_tgt = 'Exportziel'.
 
-  %_s_werks_%_app_%-text = 'Werk(e) / Plant(s)'.
-  %_s_matnr_%_app_%-text = 'Material / Material'.
-  %_s_mtart_%_app_%-text = 'Materialart / Material type'.
-  %_s_matkl_%_app_%-text = 'Warengruppe / Material group'.
-  %_s_dismm_%_app_%-text = 'Dispomerkmal / MRP type'.
-  %_s_maabc_%_app_%-text = 'ABC-Kennzeichen / ABC indicator'.
-  %_s_budat_%_app_%-text = 'Buchungsdatum / Posting date'.
-  %_s_bwart_%_app_%-text = 'Bewegungsart / Movement type'.
-  %_s_sobkz_%_app_%-text = 'Sonderbestand / Special stock'.
-  %_p_fmrp_%_app_%-text = 'Dispobereiche ausschliessen / Exclude MRP areas'.
-  %_p_fuom_%_app_%-text = 'Alternative ME ausschliessen / Exclude alt. UoM'.
-  %_p_front_%_app_%-text = 'Frontend-Download / Frontend download'.
-  %_p_serv_%_app_%-text = 'Applikationsserver / Application server'.
-  %_p_path_%_app_%-text = 'Zielordner, XLSX- oder ZIP-Datei / Target folder, XLSX or ZIP file'.
-  %_p_maxrow_%_app_%-text = 'Max. Zeilen je Arbeitsmappe / Max rows per workbook'.
+      %_s_werks_%_app_%-text = 'Werk(e)'.
+      %_s_matnr_%_app_%-text = 'Material'.
+      %_s_mtart_%_app_%-text = 'Materialart'.
+      %_s_matkl_%_app_%-text = 'Warengruppe'.
+      %_s_dismm_%_app_%-text = 'Dispomerkmal'.
+      %_s_maabc_%_app_%-text = 'ABC-Kennzeichen'.
+      %_s_budat_%_app_%-text = 'Buchungsdatum'.
+      %_s_bwart_%_app_%-text = 'Bewegungsart'.
+      %_s_sobkz_%_app_%-text = 'Sonderbestand'.
+      %_p_fmrp_%_app_%-text = 'Dispobereiche ausschliessen'.
+      %_p_fuom_%_app_%-text = 'Alternative ME ausschliessen'.
+      %_p_front_%_app_%-text = 'Frontend-Download'.
+      %_p_serv_%_app_%-text = 'Applikationsserver'.
+      %_p_path_%_app_%-text = 'Zielordner, XLSX- oder ZIP-Datei'.
+      %_p_maxrow_%_app_%-text = 'Max. Zeilen je Arbeitsmappe'.
+
+    WHEN OTHERS.
+      sscrfields-functxt_01 = 'Schedule job'.
+
+      gv_t_org = 'Organization and material'.
+      gv_t_mov = 'Movement data'.
+      gv_t_flt = 'Exclusion filters'.
+      gv_t_tgt = 'Export target'.
+
+      %_s_werks_%_app_%-text = 'Plant(s)'.
+      %_s_matnr_%_app_%-text = 'Material'.
+      %_s_mtart_%_app_%-text = 'Material type'.
+      %_s_matkl_%_app_%-text = 'Material group'.
+      %_s_dismm_%_app_%-text = 'MRP type'.
+      %_s_maabc_%_app_%-text = 'ABC indicator'.
+      %_s_budat_%_app_%-text = 'Posting date'.
+      %_s_bwart_%_app_%-text = 'Movement type'.
+      %_s_sobkz_%_app_%-text = 'Special stock'.
+      %_p_fmrp_%_app_%-text = 'Exclude MRP areas'.
+      %_p_fuom_%_app_%-text = 'Exclude alternative UoM'.
+      %_p_front_%_app_%-text = 'Frontend download'.
+      %_p_serv_%_app_%-text = 'Application server'.
+      %_p_path_%_app_%-text = 'Target folder, XLSX or ZIP file'.
+      %_p_maxrow_%_app_%-text = 'Max rows per workbook'.
+  ENDCASE.
 
   " Defaults nur im Dialog setzen: Bei SUBMIT ... VIA JOB laeuft
   " INITIALIZATION vor der Uebernahme der Selektionstabelle, und
@@ -267,10 +294,32 @@ INITIALIZATION.
   " keine Zeilen. Eine im Dialog bewusst geleerte Selektion (z.B.
   " "alle Bewegungsarten") wuerde im Job sonst still re-defaulted.
   IF sy-batch IS INITIAL.
+    DATA: lv_first_curr_month TYPE sy-datum,
+          lv_start_year       TYPE i,
+          lv_start_month      TYPE i,
+          lv_start_year_txt   TYPE c LENGTH 4,
+          lv_start_month_txt  TYPE n LENGTH 2.
+
+    lv_first_curr_month = sy-datum.
+    lv_first_curr_month+6(2) = '01'.
+
     s_budat-sign   = 'I'.
     s_budat-option = 'BT'.
-    s_budat-low    = sy-datum - 730.
-    s_budat-high   = sy-datum.
+    s_budat-high   = lv_first_curr_month - 1.
+
+    lv_start_year  = s_budat-high(4).
+    lv_start_month = s_budat-high+4(2).
+    DO 23 TIMES.
+      lv_start_month = lv_start_month - 1.
+      IF lv_start_month = 0.
+        lv_start_month = 12.
+        lv_start_year = lv_start_year - 1.
+      ENDIF.
+    ENDDO.
+    lv_start_year_txt = lv_start_year.
+    lv_start_month_txt = lv_start_month.
+    CONCATENATE lv_start_year_txt lv_start_month_txt '01'
+      INTO s_budat-low.
     APPEND s_budat.
 
     " MVP verarbeitet Nachfragebewegungen aus diesen BWARTs.
