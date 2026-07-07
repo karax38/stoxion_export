@@ -31,6 +31,13 @@
 *&   - Zahlen/Datum explizit im Parser-Format ausgegeben
 *&   - Selektionsbildschirm deutsch/englisch beschriftet
 *&
+*& Version 4 - Aenderungen ggue. v3:
+*&   - Workbook-Reihenfolge und Kopfzeilen an MVP-Template main angeglichen
+*&   - Bewegungsarten default auf MVP-relevante Nachfragearten gesetzt
+*&   - Bewegungsdaten-Defaultzeitraum auf ca. 24 Monate begrenzt
+*&   - Abbruch vor XLSX-Erzeugung, wenn MATDOC das Excel-Zeilenlimit
+*&     ueberschreitet
+*&
 *& Release  : Min. NW 7.40 (Inline-Deklarationen).
 *&            Lauffaehig auf ECC 6.0 und S/4HANA.
 *&
@@ -57,8 +64,9 @@ REPORT zstoxion_export.
 TABLES: mara, marc, mseg, mkpf, sscrfields.
 TYPE-POOLS: sabc.
 
-CONSTANTS: gc_tab   TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
-           gc_chunk TYPE i VALUE 1000.   "Materialien je Bewegungs-Paket
+CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
+           gc_chunk          TYPE i VALUE 1000,     "Materialien je Bewegungs-Paket
+           gc_excel_max_rows TYPE i VALUE 1048576.  "Excel-Zeilenlimit je Sheet
 
 DATA: gv_title_org    TYPE c LENGTH 70,
       gv_title_mov    TYPE c LENGTH 70,
@@ -81,7 +89,7 @@ SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_title_mov.
   SELECT-OPTIONS: s_budat FOR mkpf-budat OBLIGATORY,  "Buchungsdatum
-                  s_bwart FOR mseg-bwart,              "Bewegungsart (opt.)
+                  s_bwart FOR mseg-bwart,              "Bewegungsart (MVP-Default)
                   s_sobkz FOR mseg-sobkz.              "Sonderbestand (opt.)
 SELECTION-SCREEN END OF BLOCK b2.
 
@@ -149,13 +157,14 @@ TYPES: BEGIN OF ty_plant,
        BEGIN OF ty_sheet,
          name  TYPE string,
          lines TYPE tt_string,
-       END OF ty_sheet.
+       END OF ty_sheet,
+       tt_sheet TYPE STANDARD TABLE OF ty_sheet WITH DEFAULT KEY.
 
 DATA: gt_plants TYPE STANDARD TABLE OF ty_plant,
       gt_marc   TYPE STANDARD TABLE OF ty_marc,
       gt_mara   TYPE STANDARD TABLE OF ty_mara,
       gt_lines  TYPE STANDARD TABLE OF string,
-      gt_sheets TYPE STANDARD TABLE OF ty_sheet.
+      gt_sheets TYPE tt_sheet.
 
 " Sheet-Writer-Status (XLSX-Reiterpuffer)
 DATA: gv_xlsx_file TYPE string,
@@ -190,9 +199,20 @@ INITIALIZATION.
 
   s_budat-sign   = 'I'.
   s_budat-option = 'BT'.
-  s_budat-low    = sy-datum - 1095.
+  s_budat-low    = sy-datum - 730.
   s_budat-high   = sy-datum.
   APPEND s_budat.
+
+  " MVP verarbeitet Nachfragebewegungen aus diesen BWARTs.
+  s_bwart-sign   = 'I'.
+  s_bwart-option = 'EQ'.
+  s_bwart-low    = '201'. APPEND s_bwart.
+  s_bwart-low    = '261'. APPEND s_bwart.
+  s_bwart-low    = '281'. APPEND s_bwart.
+  s_bwart-low    = '601'. APPEND s_bwart.
+  s_bwart-low    = '641'. APPEND s_bwart.
+  s_bwart-low    = '643'. APPEND s_bwart.
+  s_bwart-low    = '645'. APPEND s_bwart.
 
 *----------------------------------------------------------------------*
 AT SELECTION-SCREEN.
@@ -362,7 +382,7 @@ START-OF-SELECTION.
 
 * --- T001 (eindeutige Buchungskreise) ---------------------------------
   CLEAR gt_lines.
-  APPEND |Buchungskreis{ gc_tab }Waehrung| TO gt_lines.
+  APPEND |Buchungskreis{ gc_tab }Währung| TO gt_lines.
   APPEND |BUKRS{ gc_tab }WAERS|            TO gt_lines.
   DATA(lt_bukrs) = gt_plants.
   SORT lt_bukrs BY bukrs.
@@ -385,7 +405,7 @@ START-OF-SELECTION.
 
 * --- T006 ---
   CLEAR gt_lines.
-  APPEND |Masseinheit{ gc_tab }Anzahl Dezimalstellen| TO gt_lines.
+  APPEND |Maßeinheit{ gc_tab }Anzahl Dezimalstellen| TO gt_lines.
   APPEND |MSEHI{ gc_tab }DECAN|                        TO gt_lines.
   LOOP AT lt_t006 ASSIGNING FIELD-SYMBOL(<ls_t006>).
     APPEND |{ <ls_t006>-msehi }{ gc_tab }{ <ls_t006>-decan NUMBER = RAW }| TO gt_lines.
@@ -428,7 +448,7 @@ START-OF-SELECTION.
 
 * --- MARA ---
   CLEAR gt_lines.
-  APPEND |Materialnummer{ gc_tab }Materialart{ gc_tab }Loeschvormerkung{ gc_tab }Basismengeneinheit| TO gt_lines.
+  APPEND |Materialnummer{ gc_tab }Materialart{ gc_tab }Löschvormerkung{ gc_tab }Basismengeneinheit| TO gt_lines.
   APPEND |MATNR{ gc_tab }MTART{ gc_tab }LVORM{ gc_tab }MEINS| TO gt_lines.
   LOOP AT gt_mara ASSIGNING FIELD-SYMBOL(<ls_mara>).
     APPEND |{ <ls_mara>-matnr }{ gc_tab }{ <ls_mara>-mtart }{ gc_tab }| &&
@@ -488,8 +508,10 @@ START-OF-SELECTION.
 
   DATA: lt_chunk TYPE STANDARD TABLE OF ty_marc_key,
         lt_mov   TYPE STANDARD TABLE OF ty_mov,
-        lv_total TYPE i.
+        lv_total TYPE i,
+        lv_max_data_rows TYPE i.
 
+  lv_max_data_rows = gc_excel_max_rows - 2.
   DATA(lv_from) = 1.
   WHILE lv_from <= lines( gt_marc ).
     CLEAR lt_chunk.
@@ -521,6 +543,11 @@ START-OF-SELECTION.
 
     SORT lt_mov BY matnr werks budat mblnr zeile.
     lv_total = lv_total + lines( lt_mov ).
+    IF lv_total > lv_max_data_rows.
+      MESSAGE |MATDOC ueberschreitet das Excel-Zeilenlimit | &&
+              |({ lv_total } Datenzeilen, max. { lv_max_data_rows }). | &&
+              |Bitte Zeitraum/Werke/Materialien weiter eingrenzen.| TYPE 'E'.
+    ENDIF.
 
     CLEAR gt_lines.
     LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov>).
@@ -536,6 +563,7 @@ START-OF-SELECTION.
   ENDWHILE.
 
   PERFORM sheet_close.
+  PERFORM reorder_sheets_like_template.
   PERFORM write_xlsx_workbook.
 
   MESSAGE |XLSX-Export abgeschlossen: { gv_xlsx_file }. | &&
@@ -582,6 +610,47 @@ FORM write_sheet USING iv_name  TYPE string
   PERFORM sheet_open  USING iv_name.
   PERFORM sheet_put   USING it_lines.
   PERFORM sheet_close.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM reorder_sheets_like_template - Reiterfolge wie MVP-Template
+*&---------------------------------------------------------------------*
+FORM reorder_sheets_like_template.
+
+  DATA lt_ordered TYPE tt_sheet.
+
+  PERFORM append_ordered_sheet USING 'T001'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'T001W'    CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'T006'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'T134'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'V438A'    CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'V_399D_E' CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MARA'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MATDOC'   CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MARC'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MBEW'     CHANGING lt_ordered.
+
+  LOOP AT gt_sheets ASSIGNING FIELD-SYMBOL(<ls_sheet>).
+    READ TABLE lt_ordered TRANSPORTING NO FIELDS
+      WITH KEY name = <ls_sheet>-name.
+    IF sy-subrc <> 0.
+      APPEND <ls_sheet> TO lt_ordered.
+    ENDIF.
+  ENDLOOP.
+
+  gt_sheets = lt_ordered.
+
+ENDFORM.
+
+FORM append_ordered_sheet USING iv_name TYPE string
+                       CHANGING ct_sheets TYPE tt_sheet.
+
+  READ TABLE gt_sheets ASSIGNING FIELD-SYMBOL(<ls_sheet>)
+    WITH KEY name = iv_name.
+  IF sy-subrc = 0.
+    APPEND <ls_sheet> TO ct_sheets.
+  ENDIF.
 
 ENDFORM.
 
