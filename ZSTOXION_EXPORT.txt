@@ -3,8 +3,8 @@
 *&---------------------------------------------------------------------*
 *& Zweck   : Template-konformer Datenexport fuer die stoxion
 *&           Safety-Stock-Optimierung (Pilot Ansmann AG).
-*&           Erzeugt je SAP-Tabelle eine Tab-getrennte Textdatei mit
-*&           zwei Kopfzeilen (Bezeichnung + technischer Feldname),
+*&           Erzeugt eine XLSX-Arbeitsmappe mit je SAP-Tabelle einem
+*&           Reiter und zwei Kopfzeilen (Bezeichnung + technischer Feldname),
 *&           identisch zur Reiterstruktur des Excel-Templates
 *&           "Soll-Sicherheitsbestand_Template.xlsx".
 *&
@@ -19,19 +19,24 @@
 *&   - Top-N entfernt (Auswahl erfolgt in stoxion)
 *&   - S/4-Weiche entfernt: immer MSEG+MKPF. Auf S/4HANA ist MSEG ein
 *&     Compatibility View auf MATDOC -> identische Daten, ein Codepfad
-*&   - Bewegungsdaten paketiert (Material-Chunks) -> konstanter
-*&     Speicherbedarf, im Server-Modus streamend geschrieben
+*&   - Bewegungsdaten paketiert (Material-Chunks)
 *&   - Hintergrundjob-Button auf dem Selektionsbild (erzwingt
 *&     Server-Export), Batch-Schutz bei sy-batch
 *&   - AUTHORITY-CHECKs: M_MATE_WRK je Werk, S_DATASET vor OPEN DATASET
 *&   - MARM-Filter als DB-Join statt Doppel-Loop
+*&
+*& Version 3 - Aenderungen ggue. v2:
+*&   - XLSX-Workbook-Ausgabe statt einzelner TXT-Dateien
+*&   - Bewegungsdaten auf gefilterte Material/Werk-Kombinationen begrenzt
+*&   - Zahlen/Datum explizit im Parser-Format ausgegeben
+*&   - Selektionsbildschirm deutsch/englisch beschriftet
 *&
 *& Release  : Min. NW 7.40 (Inline-Deklarationen).
 *&            Lauffaehig auf ECC 6.0 und S/4HANA.
 *&
 *& Hinweis  : Als lokales Objekt ($TMP) anlegbar -> KEIN Transport noetig.
 *&            Empfehlung fuer Voll-Export: Button "Hintergrundjob
-*&            einplanen" verwenden; Dateien danach aus AL11 abholen
+*&            einplanen" verwenden; XLSX-Datei danach aus AL11 abholen
 *&            (z.B. via CG3Y).
 *&            Datenschutz: Es werden KEINE personenbezogenen Daten
 *&            exportiert (kein Benutzername aus MKPF o.ae.).
@@ -42,10 +47,10 @@
 *&     MEINH <> Basis-ME) komplett entfernt
 *&
 *& Formatkontrakt (stoxion-Parser):
-*&   - Tab-getrennt, UTF-8, 2 Kopfzeilen
+*&   - XLSX-Arbeitsmappe, ein Reiter je Template-Reiter, 2 Kopfzeilen
 *&   - Datum roh als JJJJMMTT, Mengen/Preise mit '.' als Dezimaltrenner,
 *&     MATNR mit fuehrenden Nullen
-*&   - Dateien NICHT mit Excel oeffnen und neu speichern!
+*&   - Zellen als Text geschrieben, damit IDs unveraendert bleiben
 *&---------------------------------------------------------------------*
 REPORT zstoxion_export.
 
@@ -55,12 +60,17 @@ TYPE-POOLS: sabc.
 CONSTANTS: gc_tab   TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
            gc_chunk TYPE i VALUE 1000.   "Materialien je Bewegungs-Paket
 
+DATA: gv_title_org    TYPE c LENGTH 70,
+      gv_title_mov    TYPE c LENGTH 70,
+      gv_title_filter TYPE c LENGTH 70,
+      gv_title_target TYPE c LENGTH 70.
+
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
 *----------------------------------------------------------------------*
 SELECTION-SCREEN FUNCTION KEY 1.                "Job-Button
 
-SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE gv_title_org.
   SELECT-OPTIONS: s_werks FOR marc-werks OBLIGATORY,   "Werk(e)
                   s_matnr FOR mara-matnr,              "Material
                   s_mtart FOR mara-mtart,              "Materialart
@@ -69,22 +79,22 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
                   s_maabc FOR marc-maabc.              "ABC-Kennzeichen
 SELECTION-SCREEN END OF BLOCK b1.
 
-SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-002.
-  SELECT-OPTIONS: s_budat FOR mkpf-budat,              "Buchungsdatum
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_title_mov.
+  SELECT-OPTIONS: s_budat FOR mkpf-budat OBLIGATORY,  "Buchungsdatum
                   s_bwart FOR mseg-bwart,              "Bewegungsart (opt.)
                   s_sobkz FOR mseg-sobkz.              "Sonderbestand (opt.)
 SELECTION-SCREEN END OF BLOCK b2.
 
-SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-003.
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE gv_title_filter.
   PARAMETERS: p_fmrp AS CHECKBOX DEFAULT 'X',          "Filter Dispobereich
               p_fuom AS CHECKBOX DEFAULT 'X'.          "Filter alt. ME
 SELECTION-SCREEN END OF BLOCK b3.
 
-SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-004.
+SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_title_target.
   PARAMETERS: p_front RADIOBUTTON GROUP rb DEFAULT 'X', "Frontend-Download
               p_serv  RADIOBUTTON GROUP rb.             "Applikationsserver
   PARAMETERS: p_path  TYPE string LOWER CASE
-                      DEFAULT 'C:\stoxion\'.            "Zielordner / AL11-Pfad
+                      DEFAULT 'C:\stoxion\stoxion_export.xlsx'. "Ziel
 SELECTION-SCREEN END OF BLOCK b4.
 
 *----------------------------------------------------------------------*
@@ -117,6 +127,10 @@ TYPES: BEGIN OF ty_plant,
          lvorm TYPE mara-lvorm,
          meins TYPE mara-meins,
        END OF ty_mara,
+       BEGIN OF ty_marc_key,
+         matnr TYPE marc-matnr,
+         werks TYPE marc-werks,
+       END OF ty_marc_key,
        BEGIN OF ty_mov,
          matnr TYPE matnr,
          werks TYPE werks_d,
@@ -130,22 +144,55 @@ TYPES: BEGIN OF ty_plant,
          sjahr TYPE gjahr,
          smbln TYPE smbln,
          smblp TYPE smblp,
-       END OF ty_mov.
+       END OF ty_mov,
+       tt_string TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
+       BEGIN OF ty_sheet,
+         name  TYPE string,
+         lines TYPE tt_string,
+       END OF ty_sheet.
 
 DATA: gt_plants TYPE STANDARD TABLE OF ty_plant,
       gt_marc   TYPE STANDARD TABLE OF ty_marc,
       gt_mara   TYPE STANDARD TABLE OF ty_mara,
-      gt_lines  TYPE STANDARD TABLE OF string.
+      gt_lines  TYPE STANDARD TABLE OF string,
+      gt_sheets TYPE STANDARD TABLE OF ty_sheet.
 
-" Sheet-Writer-Status (Abstraktion Frontend-Puffer vs. Server-Stream)
-DATA: gv_sh_file   TYPE string,
+" Sheet-Writer-Status (XLSX-Reiterpuffer)
+DATA: gv_xlsx_file TYPE string,
+      gv_sh_name   TYPE string,
       gv_sh_isopen TYPE abap_bool,
       gt_sh_buffer TYPE STANDARD TABLE OF string.
 
 *----------------------------------------------------------------------*
 INITIALIZATION.
 *----------------------------------------------------------------------*
-  sscrfields-functxt_01 = 'Hintergrundjob einplanen'.
+  sscrfields-functxt_01 = 'Job einplanen / Schedule job'.
+
+  gv_title_org    = 'Organisation und Material / Organization and material'.
+  gv_title_mov    = 'Bewegungsdaten / Movement data'.
+  gv_title_filter = 'Ausschlussfilter / Exclusion filters'.
+  gv_title_target = 'Exportziel / Export target'.
+
+  %_s_werks_%_app_%-text = 'Werk(e) / Plant(s)'.
+  %_s_matnr_%_app_%-text = 'Material / Material'.
+  %_s_mtart_%_app_%-text = 'Materialart / Material type'.
+  %_s_matkl_%_app_%-text = 'Warengruppe / Material group'.
+  %_s_dismm_%_app_%-text = 'Dispomerkmal / MRP type'.
+  %_s_maabc_%_app_%-text = 'ABC-Kennzeichen / ABC indicator'.
+  %_s_budat_%_app_%-text = 'Buchungsdatum / Posting date'.
+  %_s_bwart_%_app_%-text = 'Bewegungsart / Movement type'.
+  %_s_sobkz_%_app_%-text = 'Sonderbestand / Special stock'.
+  %_p_fmrp_%_app_%-text = 'Dispobereiche ausschliessen / Exclude MRP areas'.
+  %_p_fuom_%_app_%-text = 'Alternative ME ausschliessen / Exclude alt. UoM'.
+  %_p_front_%_app_%-text = 'Frontend-Download / Frontend download'.
+  %_p_serv_%_app_%-text = 'Applikationsserver / Application server'.
+  %_p_path_%_app_%-text = 'Zielordner oder XLSX-Datei / Target folder or XLSX file'.
+
+  s_budat-sign   = 'I'.
+  s_budat-option = 'BT'.
+  s_budat-low    = sy-datum - 1095.
+  s_budat-high   = sy-datum.
+  APPEND s_budat.
 
 *----------------------------------------------------------------------*
 AT SELECTION-SCREEN.
@@ -158,13 +205,15 @@ AT SELECTION-SCREEN.
 START-OF-SELECTION.
 *----------------------------------------------------------------------*
 
-* --- Batch-Schutz: GUI_DOWNLOAD geht im Hintergrund nicht -------------
+* --- Batch-Schutz: Frontend-Download geht im Hintergrund nicht --------
   IF sy-batch = 'X' AND p_front = 'X'.
     p_front = space.
     p_serv  = 'X'.
     MESSAGE 'Hintergrundlauf: Ausgabe auf Server-Export umgestellt.'
       TYPE 'S'.
   ENDIF.
+
+  PERFORM validate_target_path.
 
 * --- 0) Werke aufloesen, Berechtigungen, Org-Daten --------------------
   SELECT werks, bwkey FROM t001w
@@ -293,7 +342,8 @@ START-OF-SELECTION.
     INTO TABLE @DATA(lt_mbew)
     FOR ALL ENTRIES IN @gt_marc
     WHERE matnr = @gt_marc-matnr
-      AND bwkey = @gt_marc-bwkey.
+      AND bwkey = @gt_marc-bwkey
+      AND bwtar = @space.
   SORT lt_mbew BY matnr bwkey.
   DELETE ADJACENT DUPLICATES FROM lt_mbew COMPARING matnr bwkey.
 
@@ -338,7 +388,7 @@ START-OF-SELECTION.
   APPEND |Masseinheit{ gc_tab }Anzahl Dezimalstellen| TO gt_lines.
   APPEND |MSEHI{ gc_tab }DECAN|                        TO gt_lines.
   LOOP AT lt_t006 ASSIGNING FIELD-SYMBOL(<ls_t006>).
-    APPEND |{ <ls_t006>-msehi }{ gc_tab }{ <ls_t006>-decan }| TO gt_lines.
+    APPEND |{ <ls_t006>-msehi }{ gc_tab }{ <ls_t006>-decan NUMBER = RAW }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'T006' gt_lines.
 
@@ -371,7 +421,7 @@ START-OF-SELECTION.
   APPEND |Werk{ gc_tab }Einkaufsbearbeitungszeit (Werktage)| TO gt_lines.
   APPEND |WERKS{ gc_tab }BZTEK| TO gt_lines.
   LOOP AT lt_t399d ASSIGNING FIELD-SYMBOL(<ls_t399d>).
-    APPEND |{ <ls_t399d>-werks }{ gc_tab }{ <ls_t399d>-bztek }|
+    APPEND |{ <ls_t399d>-werks }{ gc_tab }{ <ls_t399d>-bztek NUMBER = RAW }|
       TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'V_399D_E' gt_lines.
@@ -397,9 +447,11 @@ START-OF-SELECTION.
   LOOP AT gt_marc ASSIGNING <ls_marc>.
     APPEND |{ <ls_marc>-matnr }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
            |{ <ls_marc>-lvorm }{ gc_tab }{ <ls_marc>-dismm }{ gc_tab }| &&
-           |{ <ls_marc>-eisbe }{ gc_tab }{ <ls_marc>-plifz }{ gc_tab }| &&
-           |{ <ls_marc>-webaz }{ gc_tab }{ <ls_marc>-pstat }{ gc_tab }| &&
-           |{ <ls_marc>-maabc }{ gc_tab }{ <ls_marc>-wzeit }| TO gt_lines.
+           |{ <ls_marc>-eisbe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-plifz NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-webaz NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-pstat }{ gc_tab }{ <ls_marc>-maabc }{ gc_tab }| &&
+           |{ <ls_marc>-wzeit NUMBER = RAW }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MARC' gt_lines.
 
@@ -412,13 +464,14 @@ START-OF-SELECTION.
          |VERPR{ gc_tab }PEINH{ gc_tab }LVORM| TO gt_lines.
   LOOP AT lt_mbew ASSIGNING FIELD-SYMBOL(<ls_mbew>).
     APPEND |{ <ls_mbew>-matnr }{ gc_tab }{ <ls_mbew>-bwkey }{ gc_tab }| &&
-           |{ <ls_mbew>-vprsv }{ gc_tab }{ <ls_mbew>-stprs }{ gc_tab }| &&
-           |{ <ls_mbew>-verpr }{ gc_tab }{ <ls_mbew>-peinh }{ gc_tab }| &&
+           |{ <ls_mbew>-vprsv }{ gc_tab }{ <ls_mbew>-stprs NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mbew>-verpr NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mbew>-peinh NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_mbew>-lvorm }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MBEW' gt_lines.
 
-* --- MATDOC: Bewegungsdaten paketiert / streamend ----------------------
+* --- MATDOC: Bewegungsdaten paketiert ---------------------------------
 * Bewusst inkl. Stornoreferenzen (SJAHR/SMBLN/SMBLP): die Storno-
 * Bereinigung erfolgt in stoxion, daher hier roh exportieren.
   PERFORM sheet_open USING 'MATDOC'.
@@ -433,16 +486,17 @@ START-OF-SELECTION.
          |SJAHR{ gc_tab }SMBLN{ gc_tab }SMBLP| TO gt_lines.
   PERFORM sheet_put USING gt_lines.
 
-  DATA: lt_chunk TYPE STANDARD TABLE OF ty_mara,
+  DATA: lt_chunk TYPE STANDARD TABLE OF ty_marc_key,
         lt_mov   TYPE STANDARD TABLE OF ty_mov,
         lv_total TYPE i.
 
   DATA(lv_from) = 1.
-  WHILE lv_from <= lines( gt_mara ).
+  WHILE lv_from <= lines( gt_marc ).
     CLEAR lt_chunk.
-    LOOP AT gt_mara ASSIGNING <ls_mara>
+    LOOP AT gt_marc ASSIGNING <ls_marc>
          FROM lv_from TO lv_from + gc_chunk - 1.
-      APPEND <ls_mara> TO lt_chunk.
+      APPEND VALUE ty_marc_key( matnr = <ls_marc>-matnr
+                                werks = <ls_marc>-werks ) TO lt_chunk.
     ENDLOOP.
     lv_from = lv_from + gc_chunk.
     IF lt_chunk IS INITIAL.
@@ -460,7 +514,7 @@ START-OF-SELECTION.
       INTO CORRESPONDING FIELDS OF TABLE @lt_mov
       FOR ALL ENTRIES IN @lt_chunk
       WHERE m~matnr =  @lt_chunk-matnr
-        AND m~werks IN @s_werks
+        AND m~werks =  @lt_chunk-werks
         AND m~sobkz IN @s_sobkz
         AND m~bwart IN @s_bwart
         AND k~budat IN @s_budat.
@@ -472,7 +526,8 @@ START-OF-SELECTION.
     LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov>).
       APPEND |{ <ls_mov>-matnr }{ gc_tab }{ <ls_mov>-werks }{ gc_tab }| &&
              |{ <ls_mov>-bwart }{ gc_tab }{ <ls_mov>-shkzg }{ gc_tab }| &&
-             |{ <ls_mov>-menge }{ gc_tab }{ <ls_mov>-budat }{ gc_tab }| &&
+             |{ <ls_mov>-menge NUMBER = RAW }{ gc_tab }| &&
+             |{ <ls_mov>-budat DATE = RAW }{ gc_tab }| &&
              |{ <ls_mov>-mjahr }{ gc_tab }{ <ls_mov>-mblnr }{ gc_tab }| &&
              |{ <ls_mov>-zeile }{ gc_tab }{ <ls_mov>-sjahr }{ gc_tab }| &&
              |{ <ls_mov>-smbln }{ gc_tab }{ <ls_mov>-smblp }| TO gt_lines.
@@ -481,51 +536,26 @@ START-OF-SELECTION.
   ENDWHILE.
 
   PERFORM sheet_close.
+  PERFORM write_xlsx_workbook.
 
-  MESSAGE |Export abgeschlossen. { lines( gt_marc ) } Material/Werk-| &&
-          |Kombinationen, { lv_total } Bewegungen.| TYPE 'S'.
+  MESSAGE |XLSX-Export abgeschlossen: { gv_xlsx_file }. | &&
+          |{ lines( gt_marc ) } Material/Werk-Kombinationen, | &&
+          |{ lv_total } Bewegungen.| TYPE 'S'.
 
 *&---------------------------------------------------------------------*
-*& Sheet-Writer: Frontend puffert komplett, Server schreibt streamend
+*& Sheet-Writer: Reiter sammeln, am Ende als eine XLSX schreiben
 *&---------------------------------------------------------------------*
 FORM sheet_open USING iv_name TYPE string.
 
-  PERFORM build_filename USING iv_name CHANGING gv_sh_file.
-  gv_sh_isopen = abap_false.
-  CLEAR gt_sh_buffer.
-
-  IF p_serv = 'X'.
-    CALL FUNCTION 'AUTHORITY_CHECK_DATASET'
-      EXPORTING
-        activity         = sabc_act_write
-        filename         = gv_sh_file
-      EXCEPTIONS
-        no_authority     = 1
-        activity_unknown = 2
-        OTHERS           = 3.
-    IF sy-subrc <> 0.
-      MESSAGE |Keine Schreibberechtigung fuer { gv_sh_file }.| TYPE 'E'.
-    ENDIF.
-    OPEN DATASET gv_sh_file FOR OUTPUT IN TEXT MODE ENCODING UTF-8.
-    IF sy-subrc <> 0.
-      MESSAGE |Datei { gv_sh_file } nicht oeffenbar.| TYPE 'E'.
-    ENDIF.
-  ENDIF.
+  gv_sh_name = iv_name.
   gv_sh_isopen = abap_true.
+  CLEAR gt_sh_buffer.
 
 ENDFORM.
 
 FORM sheet_put USING it_lines TYPE STANDARD TABLE.
 
-  FIELD-SYMBOLS: <lv_line> TYPE string.
-
-  IF p_serv = 'X'.
-    LOOP AT it_lines ASSIGNING <lv_line>.
-      TRANSFER <lv_line> TO gv_sh_file.
-    ENDLOOP.
-  ELSE.
-    APPEND LINES OF it_lines TO gt_sh_buffer.
-  ENDIF.
+  APPEND LINES OF it_lines TO gt_sh_buffer.
 
 ENDFORM.
 
@@ -535,25 +565,10 @@ FORM sheet_close.
     RETURN.
   ENDIF.
 
-  IF p_serv = 'X'.
-    CLOSE DATASET gv_sh_file.
-  ELSE.
-    cl_gui_frontend_services=>gui_download(
-      EXPORTING
-        filename              = gv_sh_file
-        filetype              = 'ASC'
-        codepage              = '4110'        "UTF-8
-        write_field_separator = space
-      CHANGING
-        data_tab              = gt_sh_buffer
-      EXCEPTIONS
-        OTHERS                = 1 ).
-    IF sy-subrc <> 0.
-      MESSAGE |Download { gv_sh_file } fehlgeschlagen (rc={ sy-subrc }).|
-        TYPE 'W'.
-    ENDIF.
-    CLEAR gt_sh_buffer.
-  ENDIF.
+  APPEND VALUE ty_sheet( name  = gv_sh_name
+                         lines = gt_sh_buffer ) TO gt_sheets.
+  CLEAR gt_sh_buffer.
+  CLEAR gv_sh_name.
   gv_sh_isopen = abap_false.
 
 ENDFORM.
@@ -571,23 +586,258 @@ FORM write_sheet USING iv_name  TYPE string
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM build_filename - Zielpfad + Dateiname zusammensetzen
+*& FORM validate_target_path - Zielparameter vor dem Export pruefen
 *&---------------------------------------------------------------------*
-FORM build_filename USING iv_name TYPE string
-                 CHANGING cv_file TYPE string.
+FORM validate_target_path.
+
+  IF p_path IS INITIAL.
+    MESSAGE 'Bitte Zielordner oder XLSX-Datei angeben.' TYPE 'E'.
+  ENDIF.
+
+  IF p_serv = 'X' AND ( p_path CS ':\' OR p_path CS ':/' ).
+    MESSAGE 'Fuer Server-Export bitte AL11-/Unix-Pfad angeben, ' &&
+            'z.B. /tmp/stoxion/stoxion_export.xlsx.' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_workbook_filename - Zielpfad + XLSX-Dateiname
+*&---------------------------------------------------------------------*
+FORM build_workbook_filename CHANGING cv_file TYPE string.
 
   DATA(lv_sep) = COND string( WHEN p_front = 'X' THEN '\' ELSE '/' ).
 
   cv_file = p_path.
   IF cv_file IS INITIAL.
-    MESSAGE 'Bitte Zielpfad angeben.' TYPE 'E'.
+    MESSAGE 'Bitte Zielordner oder XLSX-Datei angeben.' TYPE 'E'.
+  ENDIF.
+
+  DATA(lv_lower) = to_lower( val = cv_file ).
+  IF lv_lower CP '*.xlsx'.
+    RETURN.
   ENDIF.
 
   DATA(lv_len) = strlen( cv_file ) - 1.
   IF cv_file+lv_len(1) <> lv_sep.
     cv_file = cv_file && lv_sep.
   ENDIF.
-  cv_file = |{ cv_file }{ iv_name }.txt|.
+  cv_file = |{ cv_file }stoxion_export.xlsx|.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM write_xlsx_workbook - Workbook erzeugen und binaer speichern
+*&---------------------------------------------------------------------*
+FORM write_xlsx_workbook.
+
+  DATA: lv_xlsx TYPE xstring,
+        lt_bin  TYPE solix_tab.
+
+  IF gt_sheets IS INITIAL.
+    MESSAGE 'Keine Reiterdaten fuer XLSX-Erzeugung vorhanden.' TYPE 'E'.
+  ENDIF.
+
+  PERFORM build_workbook_filename CHANGING gv_xlsx_file.
+  PERFORM build_xlsx_zip CHANGING lv_xlsx.
+
+  IF p_serv = 'X'.
+    CALL FUNCTION 'AUTHORITY_CHECK_DATASET'
+      EXPORTING
+        activity         = sabc_act_write
+        filename         = gv_xlsx_file
+      EXCEPTIONS
+        no_authority     = 1
+        activity_unknown = 2
+        OTHERS           = 3.
+    IF sy-subrc <> 0.
+      MESSAGE |Keine Schreibberechtigung fuer { gv_xlsx_file }.| TYPE 'E'.
+    ENDIF.
+
+    OPEN DATASET gv_xlsx_file FOR OUTPUT IN BINARY MODE.
+    IF sy-subrc <> 0.
+      MESSAGE |Datei { gv_xlsx_file } nicht oeffenbar.| TYPE 'E'.
+    ENDIF.
+    TRANSFER lv_xlsx TO gv_xlsx_file.
+    CLOSE DATASET gv_xlsx_file.
+  ELSE.
+    lt_bin = cl_bcs_convert=>xstring_to_solix( iv_xstring = lv_xlsx ).
+    cl_gui_frontend_services=>gui_download(
+      EXPORTING
+        bin_filesize = xstrlen( lv_xlsx )
+        filename     = gv_xlsx_file
+        filetype     = 'BIN'
+      CHANGING
+        data_tab     = lt_bin
+      EXCEPTIONS
+        OTHERS       = 1 ).
+    IF sy-subrc <> 0.
+      MESSAGE |Download { gv_xlsx_file } fehlgeschlagen (rc={ sy-subrc }).|
+        TYPE 'E'.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_xlsx_zip - minimale OpenXML-Arbeitsmappe bauen
+*&---------------------------------------------------------------------*
+FORM build_xlsx_zip CHANGING cv_xlsx TYPE xstring.
+
+  DATA: lo_zip         TYPE REF TO cl_abap_zip,
+        lv_content     TYPE string,
+        lv_workbook    TYPE string,
+        lv_rels        TYPE string,
+        lv_root_rels   TYPE string,
+        lv_sheet_xml   TYPE string,
+        lv_sheet_name  TYPE string,
+        lv_part_name   TYPE string,
+        lv_sheet_no    TYPE i,
+        lv_sheet_no_c  TYPE string.
+
+  CREATE OBJECT lo_zip.
+
+  lv_content =
+    |<?xml version="1.0" encoding="UTF-8" standalone="yes"?>| &&
+    |<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">| &&
+    |<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>| &&
+    |<Default Extension="xml" ContentType="application/xml"/>| &&
+    |<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>|.
+
+  lv_workbook =
+    |<?xml version="1.0" encoding="UTF-8" standalone="yes"?>| &&
+    |<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" | &&
+    |xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>|.
+
+  lv_rels =
+    |<?xml version="1.0" encoding="UTF-8" standalone="yes"?>| &&
+    |<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">|.
+
+  lv_sheet_no = 0.
+  LOOP AT gt_sheets ASSIGNING FIELD-SYMBOL(<ls_sheet>).
+    lv_sheet_no = lv_sheet_no + 1.
+    lv_sheet_no_c = lv_sheet_no.
+    CONDENSE lv_sheet_no_c NO-GAPS.
+    PERFORM xml_escape USING <ls_sheet>-name CHANGING lv_sheet_name.
+
+    lv_content = lv_content &&
+      |<Override PartName="/xl/worksheets/sheet{ lv_sheet_no_c }.xml" | &&
+      |ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>|.
+
+    lv_workbook = lv_workbook &&
+      |<sheet name="{ lv_sheet_name }" sheetId="{ lv_sheet_no_c }" | &&
+      |r:id="rId{ lv_sheet_no_c }"/>|.
+
+    lv_rels = lv_rels &&
+      |<Relationship Id="rId{ lv_sheet_no_c }" | &&
+      |Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" | &&
+      |Target="worksheets/sheet{ lv_sheet_no_c }.xml"/>|.
+
+    PERFORM build_worksheet_xml USING <ls_sheet>-lines CHANGING lv_sheet_xml.
+    lv_part_name = |xl/worksheets/sheet{ lv_sheet_no_c }.xml|.
+    PERFORM add_zip_string USING lo_zip lv_part_name lv_sheet_xml.
+  ENDLOOP.
+
+  lv_content = lv_content && |</Types>|.
+  lv_workbook = lv_workbook && |</sheets></workbook>|.
+  lv_rels = lv_rels && |</Relationships>|.
+
+  PERFORM add_zip_string USING lo_zip '[Content_Types].xml' lv_content.
+  PERFORM add_zip_string USING lo_zip 'xl/workbook.xml' lv_workbook.
+  PERFORM add_zip_string USING lo_zip 'xl/_rels/workbook.xml.rels' lv_rels.
+  lv_root_rels =
+    |<?xml version="1.0" encoding="UTF-8" standalone="yes"?>| &&
+    |<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">| &&
+    |<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>| &&
+    |</Relationships>|.
+  PERFORM add_zip_string USING lo_zip '_rels/.rels' lv_root_rels.
+
+  cv_xlsx = lo_zip->save( ).
+
+ENDFORM.
+
+FORM build_worksheet_xml USING it_lines TYPE tt_string
+                      CHANGING cv_xml   TYPE string.
+
+  DATA: lt_cells     TYPE STANDARD TABLE OF string,
+        lv_row       TYPE i,
+        lv_col       TYPE i,
+        lv_col_name  TYPE string,
+        lv_cell_ref  TYPE string,
+        lv_cell_xml  TYPE string,
+        lv_value     TYPE string,
+        lv_row_c     TYPE string.
+
+  cv_xml =
+    |<?xml version="1.0" encoding="UTF-8" standalone="yes"?>| &&
+    |<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">| &&
+    |<sheetData>|.
+
+  lv_row = 0.
+  LOOP AT it_lines ASSIGNING FIELD-SYMBOL(<lv_line>).
+    lv_row = lv_row + 1.
+    lv_row_c = lv_row.
+    CONDENSE lv_row_c NO-GAPS.
+    SPLIT <lv_line> AT gc_tab INTO TABLE lt_cells.
+    cv_xml = cv_xml && |<row r="{ lv_row_c }">|.
+
+    lv_col = 0.
+    LOOP AT lt_cells ASSIGNING FIELD-SYMBOL(<lv_cell>).
+      lv_col = lv_col + 1.
+      PERFORM column_name USING lv_col CHANGING lv_col_name.
+      lv_cell_ref = |{ lv_col_name }{ lv_row_c }|.
+      PERFORM xml_escape USING <lv_cell> CHANGING lv_value.
+      lv_cell_xml =
+        |<c r="{ lv_cell_ref }" t="inlineStr"><is><t>{ lv_value }</t></is></c>|.
+      cv_xml = cv_xml && lv_cell_xml.
+    ENDLOOP.
+
+    cv_xml = cv_xml && |</row>|.
+  ENDLOOP.
+
+  cv_xml = cv_xml && |</sheetData></worksheet>|.
+
+ENDFORM.
+
+FORM column_name USING iv_col TYPE i CHANGING cv_name TYPE string.
+
+  DATA: lv_col TYPE i,
+        lv_mod TYPE i,
+        lv_chr TYPE c LENGTH 1.
+
+  CLEAR cv_name.
+  lv_col = iv_col.
+  WHILE lv_col > 0.
+    lv_mod = ( lv_col - 1 ) MOD 26.
+    lv_chr = sy-abcde+lv_mod(1).
+    cv_name = lv_chr && cv_name.
+    lv_col = ( lv_col - 1 ) DIV 26.
+  ENDWHILE.
+
+ENDFORM.
+
+FORM xml_escape USING iv_value TYPE string CHANGING cv_value TYPE string.
+
+  cv_value = iv_value.
+  REPLACE ALL OCCURRENCES OF '&' IN cv_value WITH '&amp;'.
+  REPLACE ALL OCCURRENCES OF '<' IN cv_value WITH '&lt;'.
+  REPLACE ALL OCCURRENCES OF '>' IN cv_value WITH '&gt;'.
+  REPLACE ALL OCCURRENCES OF '"' IN cv_value WITH '&quot;'.
+  REPLACE ALL OCCURRENCES OF '''' IN cv_value WITH '&apos;'.
+
+ENDFORM.
+
+FORM add_zip_string USING io_zip  TYPE REF TO cl_abap_zip
+                          iv_name TYPE string
+                          iv_text TYPE string.
+
+  DATA: lo_conv    TYPE REF TO cl_abap_conv_out_ce,
+        lv_content TYPE xstring.
+
+  lo_conv = cl_abap_conv_out_ce=>create( encoding = 'UTF-8' ).
+  lo_conv->write( data = iv_text ).
+  lv_content = lo_conv->get_buffer( ).
+  io_zip->add( name = iv_name content = lv_content ).
 
 ENDFORM.
 
