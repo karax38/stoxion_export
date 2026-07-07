@@ -3,8 +3,8 @@
 *&---------------------------------------------------------------------*
 *& Zweck   : Template-konformer Datenexport fuer die stoxion
 *&           Safety-Stock-Optimierung (Pilot Ansmann AG).
-*&           Erzeugt eine XLSX-Arbeitsmappe mit je SAP-Tabelle einem
-*&           Reiter und zwei Kopfzeilen (Bezeichnung + technischer Feldname),
+*&           Erzeugt eine oder mehrere XLSX-Arbeitsmappen mit je SAP-Tabelle
+*&           einem Reiter und zwei Kopfzeilen (Bezeichnung + technischer Feldname),
 *&           identisch zur Reiterstruktur des Excel-Templates
 *&           "Soll-Sicherheitsbestand_Template.xlsx".
 *&
@@ -38,12 +38,19 @@
 *&   - Abbruch vor XLSX-Erzeugung, wenn MATDOC das Excel-Zeilenlimit
 *&     ueberschreitet
 *&
+*& Version 5 - Aenderungen ggue. v4:
+*&   - MATDOC wird an Material/Werk-Grenzen auf mehrere Arbeitsmappen
+*&     verteilt, bevor ein Excel-Reiter das Zeilenlimit ueberschreitet
+*&   - Bei mehreren Arbeitsmappen wird automatisch ein ZIP geschrieben
+*&   - MARA/MARC/MBEW werden je Arbeitsmappe auf das jeweilige
+*&     Material/Werk-Paket eingeschraenkt
+*&
 *& Release  : Min. NW 7.40 (Inline-Deklarationen).
 *&            Lauffaehig auf ECC 6.0 und S/4HANA.
 *&
 *& Hinweis  : Als lokales Objekt ($TMP) anlegbar -> KEIN Transport noetig.
 *&            Empfehlung fuer Voll-Export: Button "Hintergrundjob
-*&            einplanen" verwenden; XLSX-Datei danach aus AL11 abholen
+*&            einplanen" verwenden; Exportdatei danach aus AL11 abholen
 *&            (z.B. via CG3Y).
 *&            Datenschutz: Es werden KEINE personenbezogenen Daten
 *&            exportiert (kein Benutzername aus MKPF o.ae.).
@@ -54,7 +61,7 @@
 *&     MEINH <> Basis-ME) komplett entfernt
 *&
 *& Formatkontrakt (stoxion-Parser):
-*&   - XLSX-Arbeitsmappe, ein Reiter je Template-Reiter, 2 Kopfzeilen
+*&   - XLSX-Arbeitsmappe(n), ein Reiter je Template-Reiter, 2 Kopfzeilen
 *&   - Datum roh als JJJJMMTT, Mengen/Preise mit '.' als Dezimaltrenner,
 *&     MATNR mit fuehrenden Nullen
 *&   - Zellen als Text geschrieben, damit IDs unveraendert bleiben
@@ -65,7 +72,7 @@ TABLES: mara, marc, mseg, mkpf, sscrfields.
 TYPE-POOLS: sabc.
 
 CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
-           gc_chunk          TYPE i VALUE 1000,     "Materialien je Bewegungs-Paket
+           gc_chunk          TYPE i VALUE 250,      "Material/Werk je Bewegungs-Paket
            gc_excel_max_rows TYPE i VALUE 1048576.  "Excel-Zeilenlimit je Sheet
 
 DATA: gv_title_org    TYPE c LENGTH 70,
@@ -153,6 +160,40 @@ TYPES: BEGIN OF ty_plant,
          smbln TYPE smbln,
          smblp TYPE smblp,
        END OF ty_mov,
+       BEGIN OF ty_mbew,
+         matnr TYPE mbew-matnr,
+         bwkey TYPE mbew-bwkey,
+         vprsv TYPE mbew-vprsv,
+         stprs TYPE mbew-stprs,
+         verpr TYPE mbew-verpr,
+         peinh TYPE mbew-peinh,
+         lvorm TYPE mbew-lvorm,
+       END OF ty_mbew,
+       BEGIN OF ty_t006,
+         msehi TYPE t006-msehi,
+         decan TYPE t006-decan,
+       END OF ty_t006,
+       BEGIN OF ty_t134,
+         mtart TYPE t134-mtart,
+       END OF ty_t134,
+       BEGIN OF ty_t438a,
+         dismm TYPE t438a-dismm,
+         disvf TYPE t438a-disvf,
+       END OF ty_t438a,
+       BEGIN OF ty_t399d,
+         werks TYPE t399d-werks,
+         bztek TYPE t399d-bztek,
+       END OF ty_t399d,
+       tt_plant TYPE STANDARD TABLE OF ty_plant WITH DEFAULT KEY,
+       tt_marc  TYPE STANDARD TABLE OF ty_marc  WITH DEFAULT KEY,
+       tt_mara  TYPE STANDARD TABLE OF ty_mara  WITH DEFAULT KEY,
+       tt_key   TYPE STANDARD TABLE OF ty_marc_key WITH DEFAULT KEY,
+       tt_mov   TYPE STANDARD TABLE OF ty_mov   WITH DEFAULT KEY,
+       tt_mbew  TYPE STANDARD TABLE OF ty_mbew  WITH DEFAULT KEY,
+       tt_t006  TYPE STANDARD TABLE OF ty_t006  WITH DEFAULT KEY,
+       tt_t134  TYPE STANDARD TABLE OF ty_t134  WITH DEFAULT KEY,
+       tt_t438a TYPE STANDARD TABLE OF ty_t438a WITH DEFAULT KEY,
+       tt_t399d TYPE STANDARD TABLE OF ty_t399d WITH DEFAULT KEY,
        tt_string TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
        BEGIN OF ty_sheet,
          name  TYPE string,
@@ -160,9 +201,8 @@ TYPES: BEGIN OF ty_plant,
        END OF ty_sheet,
        tt_sheet TYPE STANDARD TABLE OF ty_sheet WITH DEFAULT KEY.
 
-DATA: gt_plants TYPE STANDARD TABLE OF ty_plant,
-      gt_marc   TYPE STANDARD TABLE OF ty_marc,
-      gt_mara   TYPE STANDARD TABLE OF ty_mara,
+DATA: gt_plants TYPE tt_plant,
+      gt_marc   TYPE tt_marc,
       gt_lines  TYPE STANDARD TABLE OF string,
       gt_sheets TYPE tt_sheet.
 
@@ -171,6 +211,12 @@ DATA: gv_xlsx_file TYPE string,
       gv_sh_name   TYPE string,
       gv_sh_isopen TYPE abap_bool,
       gt_sh_buffer TYPE STANDARD TABLE OF string.
+
+" Ergebnis-Writer: ein XLSX direkt, mehrere XLSX als ZIP
+DATA: go_result_zip     TYPE REF TO cl_abap_zip,
+      gv_workbook_count TYPE i,
+      gv_single_xlsx    TYPE xstring,
+      gv_single_name    TYPE string.
 
 *----------------------------------------------------------------------*
 INITIALIZATION.
@@ -195,7 +241,7 @@ INITIALIZATION.
   %_p_fuom_%_app_%-text = 'Alternative ME ausschliessen / Exclude alt. UoM'.
   %_p_front_%_app_%-text = 'Frontend-Download / Frontend download'.
   %_p_serv_%_app_%-text = 'Applikationsserver / Application server'.
-  %_p_path_%_app_%-text = 'Zielordner oder XLSX-Datei / Target folder or XLSX file'.
+  %_p_path_%_app_%-text = 'Zielordner, XLSX- oder ZIP-Datei / Target folder, XLSX or ZIP file'.
 
   s_budat-sign   = 'I'.
   s_budat-option = 'BT'.
@@ -346,20 +392,11 @@ START-OF-SELECTION.
 
   SORT gt_marc BY matnr werks.
 
-* --- 4) MARA-Liste (eindeutige Materialien) ---------------------------
-  LOOP AT gt_marc ASSIGNING <ls_marc>.
-    APPEND VALUE ty_mara( matnr = <ls_marc>-matnr
-                          mtart = <ls_marc>-mtart
-                          lvorm = space
-                          meins = <ls_marc>-meins ) TO gt_mara.
-  ENDLOOP.
-  SORT gt_mara BY matnr.
-  DELETE ADJACENT DUPLICATES FROM gt_mara COMPARING matnr.
-
-* --- 5) MBEW (je Material + Bewertungskreis) --------------------------
+* --- 4) MBEW (je Material + Bewertungskreis) --------------------------
+  DATA lt_mbew TYPE tt_mbew.
   SELECT matnr, bwkey, vprsv, stprs, verpr, peinh, lvorm
     FROM mbew
-    INTO TABLE @DATA(lt_mbew)
+    INTO CORRESPONDING FIELDS OF TABLE @lt_mbew
     FOR ALL ENTRIES IN @gt_marc
     WHERE matnr = @gt_marc-matnr
       AND bwkey = @gt_marc-bwkey
@@ -367,156 +404,53 @@ START-OF-SELECTION.
   SORT lt_mbew BY matnr bwkey.
   DELETE ADJACENT DUPLICATES FROM lt_mbew COMPARING matnr bwkey.
 
-* --- 6) Customizing-/Konfig-Tabellen ----------------------------------
-  SELECT msehi, decan FROM t006 INTO TABLE @DATA(lt_t006).
-  SELECT mtart FROM t134 INTO TABLE @DATA(lt_t134).
-  SELECT dismm, disvf FROM t438a INTO TABLE @DATA(lt_t438a).
+* --- 5) Customizing-/Konfig-Tabellen ----------------------------------
+  DATA: lt_t006  TYPE tt_t006,
+        lt_t134  TYPE tt_t134,
+        lt_t438a TYPE tt_t438a,
+        lt_t399d TYPE tt_t399d.
+
+  SELECT msehi, decan FROM t006
+    INTO CORRESPONDING FIELDS OF TABLE @lt_t006.
+  SELECT mtart FROM t134
+    INTO CORRESPONDING FIELDS OF TABLE @lt_t134.
+  SELECT dismm, disvf FROM t438a
+    INTO CORRESPONDING FIELDS OF TABLE @lt_t438a.
   SELECT werks, bztek FROM t399d
-    INTO TABLE @DATA(lt_t399d)
+    INTO CORRESPONDING FIELDS OF TABLE @lt_t399d
     WHERE werks IN @s_werks.
   SORT lt_t399d BY werks.
 
 *----------------------------------------------------------------------*
-* 7) Ausgabe je Reiter erzeugen
+* 6) Ausgabe je Reiter erzeugen
 *----------------------------------------------------------------------*
-
-* --- T001 (eindeutige Buchungskreise) ---------------------------------
-  CLEAR gt_lines.
-  APPEND |Buchungskreis{ gc_tab }Währung| TO gt_lines.
-  APPEND |BUKRS{ gc_tab }WAERS|            TO gt_lines.
-  DATA(lt_bukrs) = gt_plants.
-  SORT lt_bukrs BY bukrs.
-  DELETE ADJACENT DUPLICATES FROM lt_bukrs COMPARING bukrs.
-  LOOP AT lt_bukrs ASSIGNING <ls_plant>.
-    APPEND |{ <ls_plant>-bukrs }{ gc_tab }{ <ls_plant>-waers }|
-      TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'T001' gt_lines.
-
-* --- T001W (je Werk) ---------------------------------------------------
-  CLEAR gt_lines.
-  APPEND |Werk{ gc_tab }Bewertungskreis| TO gt_lines.
-  APPEND |WERKS{ gc_tab }BWKEY|          TO gt_lines.
-  LOOP AT gt_plants ASSIGNING <ls_plant>.
-    APPEND |{ <ls_plant>-werks }{ gc_tab }{ <ls_plant>-bwkey }|
-      TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'T001W' gt_lines.
-
-* --- T006 ---
-  CLEAR gt_lines.
-  APPEND |Maßeinheit{ gc_tab }Anzahl Dezimalstellen| TO gt_lines.
-  APPEND |MSEHI{ gc_tab }DECAN|                        TO gt_lines.
-  LOOP AT lt_t006 ASSIGNING FIELD-SYMBOL(<ls_t006>).
-    APPEND |{ <ls_t006>-msehi }{ gc_tab }{ <ls_t006>-decan NUMBER = RAW }| TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'T006' gt_lines.
-
-* --- T134 ---
-* Hinweis: PROD_TYPE_CODE wird nur fuer Standard-Service-Materialarten
-* (SERV/DIEN) abgeleitet. Kundeneigene Z-Materialarten fuer Dienst-
-* leistungen ggf. hier ergaenzen.
-  CLEAR gt_lines.
-  APPEND |Materialart{ gc_tab }Produkttyp (Material / Service / Subscription)| TO gt_lines.
-  APPEND |MTART{ gc_tab }PROD_TYPE_CODE| TO gt_lines.
-  LOOP AT lt_t134 ASSIGNING FIELD-SYMBOL(<ls_t134>).
-    DATA(lv_prod) = COND string(
-      WHEN <ls_t134>-mtart = 'SERV' OR <ls_t134>-mtart = 'DIEN'
-      THEN '2' ELSE '' ).
-    APPEND |{ <ls_t134>-mtart }{ gc_tab }{ lv_prod }| TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'T134' gt_lines.
-
-* --- V438A ---
-  CLEAR gt_lines.
-  APPEND |Dispositionsverfahren{ gc_tab }Dispositionskennzeichen (aus DISMM abgeleitet)| TO gt_lines.
-  APPEND |DISMM{ gc_tab }DISVF| TO gt_lines.
-  LOOP AT lt_t438a ASSIGNING FIELD-SYMBOL(<ls_t438a>).
-    APPEND |{ <ls_t438a>-dismm }{ gc_tab }{ <ls_t438a>-disvf }| TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'V438A' gt_lines.
-
-* --- V_399D_E (je Werk) ------------------------------------------------
-  CLEAR gt_lines.
-  APPEND |Werk{ gc_tab }Einkaufsbearbeitungszeit (Werktage)| TO gt_lines.
-  APPEND |WERKS{ gc_tab }BZTEK| TO gt_lines.
-  LOOP AT lt_t399d ASSIGNING FIELD-SYMBOL(<ls_t399d>).
-    APPEND |{ <ls_t399d>-werks }{ gc_tab }{ <ls_t399d>-bztek NUMBER = RAW }|
-      TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'V_399D_E' gt_lines.
-
-* --- MARA ---
-  CLEAR gt_lines.
-  APPEND |Materialnummer{ gc_tab }Materialart{ gc_tab }Löschvormerkung{ gc_tab }Basismengeneinheit| TO gt_lines.
-  APPEND |MATNR{ gc_tab }MTART{ gc_tab }LVORM{ gc_tab }MEINS| TO gt_lines.
-  LOOP AT gt_mara ASSIGNING FIELD-SYMBOL(<ls_mara>).
-    APPEND |{ <ls_mara>-matnr }{ gc_tab }{ <ls_mara>-mtart }{ gc_tab }| &&
-           |{ <ls_mara>-lvorm }{ gc_tab }{ <ls_mara>-meins }| TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'MARA' gt_lines.
-
-* --- MARC ---
-  CLEAR gt_lines.
-  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Loeschvormerkung{ gc_tab }| &&
-         |Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
-         |Planlieferzeit (Kalendertage){ gc_tab }Wareneingangsbearbeitungszeit (Werktage){ gc_tab }| &&
-         |Pflegestatus (D/E/L){ gc_tab }ABC-Indikator{ gc_tab }Wiederbeschaffungszeit (optional)| TO gt_lines.
-  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
-         |PLIFZ{ gc_tab }WEBAZ{ gc_tab }PSTAT{ gc_tab }MAABC{ gc_tab }WZEIT| TO gt_lines.
-  LOOP AT gt_marc ASSIGNING <ls_marc>.
-    APPEND |{ <ls_marc>-matnr }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
-           |{ <ls_marc>-lvorm }{ gc_tab }{ <ls_marc>-dismm }{ gc_tab }| &&
-           |{ <ls_marc>-eisbe NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-plifz NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-webaz NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-pstat }{ gc_tab }{ <ls_marc>-maabc }{ gc_tab }| &&
-           |{ <ls_marc>-wzeit NUMBER = RAW }| TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'MARC' gt_lines.
-
-* --- MBEW ---
-  CLEAR gt_lines.
-  APPEND |Materialnummer{ gc_tab }Bewertungskreis{ gc_tab }Preissteuerung{ gc_tab }| &&
-         |Standardpreis{ gc_tab }Gleitender Durchschnittspreis{ gc_tab }| &&
-         |Preiseinheit{ gc_tab }Loeschvormerkung| TO gt_lines.
-  APPEND |MATNR{ gc_tab }BWKEY{ gc_tab }VPRSV{ gc_tab }STPRS{ gc_tab }| &&
-         |VERPR{ gc_tab }PEINH{ gc_tab }LVORM| TO gt_lines.
-  LOOP AT lt_mbew ASSIGNING FIELD-SYMBOL(<ls_mbew>).
-    APPEND |{ <ls_mbew>-matnr }{ gc_tab }{ <ls_mbew>-bwkey }{ gc_tab }| &&
-           |{ <ls_mbew>-vprsv }{ gc_tab }{ <ls_mbew>-stprs NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mbew>-verpr NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mbew>-peinh NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mbew>-lvorm }| TO gt_lines.
-  ENDLOOP.
-  PERFORM write_sheet USING 'MBEW' gt_lines.
-
-* --- MATDOC: Bewegungsdaten paketiert ---------------------------------
+* --- MATDOC: Bewegungsdaten paketiert und bei Excel-Grenze aufgeteilt --
 * Bewusst inkl. Stornoreferenzen (SJAHR/SMBLN/SMBLP): die Storno-
 * Bereinigung erfolgt in stoxion, daher hier roh exportieren.
-  PERFORM sheet_open USING 'MATDOC'.
+  PERFORM reset_result_writer.
 
-  CLEAR gt_lines.
-  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Bewegungsart{ gc_tab }| &&
-         |Soll-/Haben-Kennzeichen{ gc_tab }Menge{ gc_tab }Buchungsdatum{ gc_tab }| &&
-         |Materialbelegjahr{ gc_tab }Materialbelegnummer{ gc_tab }Belegzeile{ gc_tab }| &&
-         |Stornojahr{ gc_tab }Stornobeleg{ gc_tab }Stornozeile| TO gt_lines.
-  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }BWART{ gc_tab }SHKZG{ gc_tab }MENGE{ gc_tab }| &&
-         |BUDAT{ gc_tab }MJAHR{ gc_tab }MBLNR{ gc_tab }ZEILE{ gc_tab }| &&
-         |SJAHR{ gc_tab }SMBLN{ gc_tab }SMBLP| TO gt_lines.
-  PERFORM sheet_put USING gt_lines.
-
-  DATA: lt_chunk TYPE STANDARD TABLE OF ty_marc_key,
-        lt_mov   TYPE STANDARD TABLE OF ty_mov,
-        lv_total TYPE i,
+  DATA: lt_chunk         TYPE tt_key,
+        lt_mov           TYPE tt_mov,
+        lt_key_mov       TYPE tt_mov,
+        lt_book_marc     TYPE tt_marc,
+        lt_book_mov      TYPE tt_mov,
+        lv_total         TYPE i,
+        lv_from          TYPE i,
+        lv_to            TYPE i,
+        lv_mov_idx       TYPE i,
+        lv_prev_idx      TYPE i,
+        lv_key_rows      TYPE i,
+        lv_book_mov_rows TYPE i,
         lv_max_data_rows TYPE i.
 
   lv_max_data_rows = gc_excel_max_rows - 2.
-  DATA(lv_from) = 1.
+  lv_from = 1.
+
   WHILE lv_from <= lines( gt_marc ).
     CLEAR lt_chunk.
+    lv_to = lv_from + gc_chunk - 1.
     LOOP AT gt_marc ASSIGNING <ls_marc>
-         FROM lv_from TO lv_from + gc_chunk - 1.
+         FROM lv_from TO lv_to.
       APPEND VALUE ty_marc_key( matnr = <ls_marc>-matnr
                                 werks = <ls_marc>-werks ) TO lt_chunk.
     ENDLOOP.
@@ -542,33 +476,476 @@ START-OF-SELECTION.
         AND k~budat IN @s_budat.
 
     SORT lt_mov BY matnr werks budat mblnr zeile.
-    lv_total = lv_total + lines( lt_mov ).
-    IF lv_total > lv_max_data_rows.
-      MESSAGE |MATDOC ueberschreitet das Excel-Zeilenlimit | &&
-              |({ lv_total } Datenzeilen, max. { lv_max_data_rows }). | &&
-              |Bitte Zeitraum/Werke/Materialien weiter eingrenzen.| TYPE 'E'.
-    ENDIF.
 
-    CLEAR gt_lines.
-    LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov>).
-      APPEND |{ <ls_mov>-matnr }{ gc_tab }{ <ls_mov>-werks }{ gc_tab }| &&
-             |{ <ls_mov>-bwart }{ gc_tab }{ <ls_mov>-shkzg }{ gc_tab }| &&
-             |{ <ls_mov>-menge NUMBER = RAW }{ gc_tab }| &&
-             |{ <ls_mov>-budat DATE = RAW }{ gc_tab }| &&
-             |{ <ls_mov>-mjahr }{ gc_tab }{ <ls_mov>-mblnr }{ gc_tab }| &&
-             |{ <ls_mov>-zeile }{ gc_tab }{ <ls_mov>-sjahr }{ gc_tab }| &&
-             |{ <ls_mov>-smbln }{ gc_tab }{ <ls_mov>-smblp }| TO gt_lines.
+    LOOP AT lt_chunk ASSIGNING FIELD-SYMBOL(<ls_key>).
+      CLEAR lt_key_mov.
+
+      READ TABLE lt_mov TRANSPORTING NO FIELDS
+        WITH KEY matnr = <ls_key>-matnr
+                 werks = <ls_key>-werks
+        BINARY SEARCH.
+      IF sy-subrc = 0.
+        lv_mov_idx = sy-tabix.
+        WHILE lv_mov_idx > 1.
+          lv_prev_idx = lv_mov_idx - 1.
+          READ TABLE lt_mov ASSIGNING FIELD-SYMBOL(<ls_prev_mov>)
+            INDEX lv_prev_idx.
+          IF sy-subrc <> 0 OR
+             <ls_prev_mov>-matnr <> <ls_key>-matnr OR
+             <ls_prev_mov>-werks <> <ls_key>-werks.
+            EXIT.
+          ENDIF.
+          lv_mov_idx = lv_prev_idx.
+        ENDWHILE.
+
+        LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov>)
+             FROM lv_mov_idx.
+          IF <ls_mov>-matnr <> <ls_key>-matnr OR
+             <ls_mov>-werks <> <ls_key>-werks.
+            EXIT.
+          ENDIF.
+          APPEND <ls_mov> TO lt_key_mov.
+        ENDLOOP.
+      ENDIF.
+
+      lv_key_rows = lines( lt_key_mov ).
+      IF lv_key_rows > lv_max_data_rows.
+        MESSAGE |Material/Werk { <ls_key>-matnr }/{ <ls_key>-werks } | &&
+                |ueberschreitet alleine das Excel-Zeilenlimit | &&
+                |({ lv_key_rows } Datenzeilen, max. { lv_max_data_rows }). | &&
+                |Bitte Zeitraum weiter eingrenzen.| TYPE 'E'.
+      ENDIF.
+
+      IF lt_book_marc IS NOT INITIAL AND
+         ( lv_book_mov_rows + lv_key_rows > lv_max_data_rows OR
+           lines( lt_book_marc ) >= lv_max_data_rows ).
+        PERFORM finalize_workbook USING lt_book_marc
+                                        lt_book_mov
+                                        gt_plants
+                                        lt_t006
+                                        lt_t134
+                                        lt_t438a
+                                        lt_t399d
+                                        lt_mbew.
+        CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
+      ENDIF.
+
+      READ TABLE gt_marc ASSIGNING <ls_marc>
+        WITH KEY matnr = <ls_key>-matnr
+                 werks = <ls_key>-werks
+        BINARY SEARCH.
+      IF sy-subrc = 0.
+        APPEND <ls_marc> TO lt_book_marc.
+      ENDIF.
+
+      APPEND LINES OF lt_key_mov TO lt_book_mov.
+      lv_book_mov_rows = lv_book_mov_rows + lv_key_rows.
+      lv_total = lv_total + lv_key_rows.
     ENDLOOP.
-    PERFORM sheet_put USING gt_lines.
   ENDWHILE.
 
-  PERFORM sheet_close.
-  PERFORM reorder_sheets_like_template.
-  PERFORM write_xlsx_workbook.
+  IF lt_book_marc IS NOT INITIAL.
+    PERFORM finalize_workbook USING lt_book_marc
+                                    lt_book_mov
+                                    gt_plants
+                                    lt_t006
+                                    lt_t134
+                                    lt_t438a
+                                    lt_t399d
+                                    lt_mbew.
+    CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
+  ENDIF.
+  CLEAR: lt_chunk, lt_mov, lt_key_mov.
+
+  PERFORM write_export_result.
 
   MESSAGE |XLSX-Export abgeschlossen: { gv_xlsx_file }. | &&
           |{ lines( gt_marc ) } Material/Werk-Kombinationen, | &&
-          |{ lv_total } Bewegungen.| TYPE 'S'.
+          |{ lv_total } Bewegungen, | &&
+          |{ gv_workbook_count } Arbeitsmappe(n).| TYPE 'S'.
+
+*&---------------------------------------------------------------------*
+*& Ergebnis-Writer initialisieren
+*&---------------------------------------------------------------------*
+FORM reset_result_writer.
+
+  CLEAR: gt_sheets,
+         gt_sh_buffer,
+         gv_sh_name,
+         gv_sh_isopen,
+         go_result_zip,
+         gv_workbook_count,
+         gv_single_xlsx,
+         gv_single_name,
+         gv_xlsx_file.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM finalize_workbook - Paket als komplette Arbeitsmappe erzeugen
+*&---------------------------------------------------------------------*
+FORM finalize_workbook USING it_book_marc TYPE tt_marc
+                             it_book_mov  TYPE tt_mov
+                             it_plants    TYPE tt_plant
+                             it_t006      TYPE tt_t006
+                             it_t134      TYPE tt_t134
+                             it_t438a     TYPE tt_t438a
+                             it_t399d     TYPE tt_t399d
+                             it_mbew_all  TYPE tt_mbew.
+
+  DATA: lt_book_plants TYPE tt_plant,
+        lt_book_mara   TYPE tt_mara,
+        lt_book_mbew   TYPE tt_mbew,
+        lv_xlsx        TYPE xstring.
+
+  CLEAR gt_sheets.
+
+  LOOP AT it_book_marc ASSIGNING FIELD-SYMBOL(<ls_book_marc>).
+    READ TABLE it_plants ASSIGNING FIELD-SYMBOL(<ls_book_plant>)
+      WITH KEY werks = <ls_book_marc>-werks.
+    IF sy-subrc = 0.
+      APPEND <ls_book_plant> TO lt_book_plants.
+    ENDIF.
+
+    APPEND VALUE ty_mara( matnr = <ls_book_marc>-matnr
+                          mtart = <ls_book_marc>-mtart
+                          lvorm = space
+                          meins = <ls_book_marc>-meins ) TO lt_book_mara.
+  ENDLOOP.
+
+  SORT lt_book_plants BY werks.
+  DELETE ADJACENT DUPLICATES FROM lt_book_plants COMPARING werks.
+  SORT lt_book_mara BY matnr.
+  DELETE ADJACENT DUPLICATES FROM lt_book_mara COMPARING matnr.
+
+  LOOP AT it_book_marc ASSIGNING <ls_book_marc>.
+    READ TABLE it_mbew_all ASSIGNING FIELD-SYMBOL(<ls_book_mbew>)
+      WITH KEY matnr = <ls_book_marc>-matnr
+               bwkey = <ls_book_marc>-bwkey
+      BINARY SEARCH.
+    IF sy-subrc = 0.
+      APPEND <ls_book_mbew> TO lt_book_mbew.
+    ENDIF.
+  ENDLOOP.
+  SORT lt_book_mbew BY matnr bwkey.
+  DELETE ADJACENT DUPLICATES FROM lt_book_mbew COMPARING matnr bwkey.
+
+  PERFORM build_common_sheets USING lt_book_plants
+                                    it_t006
+                                    it_t134
+                                    it_t438a
+                                    it_t399d.
+  PERFORM build_master_sheets USING it_book_marc
+                                    lt_book_mara
+                                    lt_book_mbew.
+  PERFORM build_matdoc_sheet USING it_book_mov.
+  PERFORM reorder_sheets_like_template.
+  PERFORM build_xlsx_zip CHANGING lv_xlsx.
+  PERFORM publish_workbook USING lv_xlsx.
+
+  CLEAR gt_sheets.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_common_sheets - Organisations-/Customizing-Reiter
+*&---------------------------------------------------------------------*
+FORM build_common_sheets USING it_plants TYPE tt_plant
+                               it_t006   TYPE tt_t006
+                               it_t134   TYPE tt_t134
+                               it_t438a  TYPE tt_t438a
+                               it_t399d  TYPE tt_t399d.
+
+* --- T001 (eindeutige Buchungskreise) ---------------------------------
+  CLEAR gt_lines.
+  APPEND |Buchungskreis{ gc_tab }Währung| TO gt_lines.
+  APPEND |BUKRS{ gc_tab }WAERS|            TO gt_lines.
+  DATA(lt_bukrs) = it_plants.
+  SORT lt_bukrs BY bukrs.
+  DELETE ADJACENT DUPLICATES FROM lt_bukrs COMPARING bukrs.
+  LOOP AT lt_bukrs ASSIGNING FIELD-SYMBOL(<ls_plant>).
+    APPEND |{ <ls_plant>-bukrs }{ gc_tab }{ <ls_plant>-waers }|
+      TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T001' gt_lines.
+
+* --- T001W (je Werk) ---------------------------------------------------
+  CLEAR gt_lines.
+  APPEND |Werk{ gc_tab }Bewertungskreis| TO gt_lines.
+  APPEND |WERKS{ gc_tab }BWKEY|          TO gt_lines.
+  LOOP AT it_plants ASSIGNING <ls_plant>.
+    APPEND |{ <ls_plant>-werks }{ gc_tab }{ <ls_plant>-bwkey }|
+      TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T001W' gt_lines.
+
+* --- T006 ---
+  CLEAR gt_lines.
+  APPEND |Maßeinheit{ gc_tab }Anzahl Dezimalstellen| TO gt_lines.
+  APPEND |MSEHI{ gc_tab }DECAN|                        TO gt_lines.
+  LOOP AT it_t006 ASSIGNING FIELD-SYMBOL(<ls_t006>).
+    APPEND |{ <ls_t006>-msehi }{ gc_tab }{ <ls_t006>-decan NUMBER = RAW }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T006' gt_lines.
+
+* --- T134 ---
+* Hinweis: PROD_TYPE_CODE wird nur fuer Standard-Service-Materialarten
+* (SERV/DIEN) abgeleitet. Kundeneigene Z-Materialarten fuer Dienst-
+* leistungen ggf. hier ergaenzen.
+  CLEAR gt_lines.
+  APPEND |Materialart{ gc_tab }Produkttyp (Material / Service / Subscription)| TO gt_lines.
+  APPEND |MTART{ gc_tab }PROD_TYPE_CODE| TO gt_lines.
+  LOOP AT it_t134 ASSIGNING FIELD-SYMBOL(<ls_t134>).
+    DATA(lv_prod) = COND string(
+      WHEN <ls_t134>-mtart = 'SERV' OR <ls_t134>-mtart = 'DIEN'
+      THEN '2' ELSE '' ).
+    APPEND |{ <ls_t134>-mtart }{ gc_tab }{ lv_prod }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T134' gt_lines.
+
+* --- V438A ---
+  CLEAR gt_lines.
+  APPEND |Dispositionsverfahren{ gc_tab }Dispositionskennzeichen (aus DISMM abgeleitet)| TO gt_lines.
+  APPEND |DISMM{ gc_tab }DISVF| TO gt_lines.
+  LOOP AT it_t438a ASSIGNING FIELD-SYMBOL(<ls_t438a>).
+    APPEND |{ <ls_t438a>-dismm }{ gc_tab }{ <ls_t438a>-disvf }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'V438A' gt_lines.
+
+* --- V_399D_E (je Werk) ------------------------------------------------
+  CLEAR gt_lines.
+  APPEND |Werk{ gc_tab }Einkaufsbearbeitungszeit (Werktage)| TO gt_lines.
+  APPEND |WERKS{ gc_tab }BZTEK| TO gt_lines.
+  LOOP AT it_t399d ASSIGNING FIELD-SYMBOL(<ls_t399d>).
+    READ TABLE it_plants TRANSPORTING NO FIELDS
+      WITH KEY werks = <ls_t399d>-werks.
+    IF sy-subrc = 0.
+      APPEND |{ <ls_t399d>-werks }{ gc_tab }{ <ls_t399d>-bztek NUMBER = RAW }|
+        TO gt_lines.
+    ENDIF.
+  ENDLOOP.
+  PERFORM write_sheet USING 'V_399D_E' gt_lines.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_master_sheets - MARA/MARC/MBEW fuer das Paket
+*&---------------------------------------------------------------------*
+FORM build_master_sheets USING it_marc TYPE tt_marc
+                               it_mara TYPE tt_mara
+                               it_mbew TYPE tt_mbew.
+
+* --- MARA ---
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Materialart{ gc_tab }Löschvormerkung{ gc_tab }Basismengeneinheit| TO gt_lines.
+  APPEND |MATNR{ gc_tab }MTART{ gc_tab }LVORM{ gc_tab }MEINS| TO gt_lines.
+  LOOP AT it_mara ASSIGNING FIELD-SYMBOL(<ls_mara>).
+    APPEND |{ <ls_mara>-matnr }{ gc_tab }{ <ls_mara>-mtart }{ gc_tab }| &&
+           |{ <ls_mara>-lvorm }{ gc_tab }{ <ls_mara>-meins }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MARA' gt_lines.
+
+* --- MARC ---
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Loeschvormerkung{ gc_tab }| &&
+         |Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
+         |Planlieferzeit (Kalendertage){ gc_tab }Wareneingangsbearbeitungszeit (Werktage){ gc_tab }| &&
+         |Pflegestatus (D/E/L){ gc_tab }ABC-Indikator{ gc_tab }Wiederbeschaffungszeit (optional)| TO gt_lines.
+  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
+         |PLIFZ{ gc_tab }WEBAZ{ gc_tab }PSTAT{ gc_tab }MAABC{ gc_tab }WZEIT| TO gt_lines.
+  LOOP AT it_marc ASSIGNING FIELD-SYMBOL(<ls_marc>).
+    APPEND |{ <ls_marc>-matnr }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
+           |{ <ls_marc>-lvorm }{ gc_tab }{ <ls_marc>-dismm }{ gc_tab }| &&
+           |{ <ls_marc>-eisbe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-plifz NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-webaz NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-pstat }{ gc_tab }{ <ls_marc>-maabc }{ gc_tab }| &&
+           |{ <ls_marc>-wzeit NUMBER = RAW }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MARC' gt_lines.
+
+* --- MBEW ---
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Bewertungskreis{ gc_tab }Preissteuerung{ gc_tab }| &&
+         |Standardpreis{ gc_tab }Gleitender Durchschnittspreis{ gc_tab }| &&
+         |Preiseinheit{ gc_tab }Loeschvormerkung| TO gt_lines.
+  APPEND |MATNR{ gc_tab }BWKEY{ gc_tab }VPRSV{ gc_tab }STPRS{ gc_tab }| &&
+         |VERPR{ gc_tab }PEINH{ gc_tab }LVORM| TO gt_lines.
+  LOOP AT it_mbew ASSIGNING FIELD-SYMBOL(<ls_mbew>).
+    APPEND |{ <ls_mbew>-matnr }{ gc_tab }{ <ls_mbew>-bwkey }{ gc_tab }| &&
+           |{ <ls_mbew>-vprsv }{ gc_tab }{ <ls_mbew>-stprs NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mbew>-verpr NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mbew>-peinh NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mbew>-lvorm }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MBEW' gt_lines.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_matdoc_sheet - Bewegungsreiter fuer das Paket
+*&---------------------------------------------------------------------*
+FORM build_matdoc_sheet USING it_mov TYPE tt_mov.
+
+  PERFORM sheet_open USING 'MATDOC'.
+
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Bewegungsart{ gc_tab }| &&
+         |Soll-/Haben-Kennzeichen{ gc_tab }Menge{ gc_tab }Buchungsdatum{ gc_tab }| &&
+         |Materialbelegjahr{ gc_tab }Materialbelegnummer{ gc_tab }Belegzeile{ gc_tab }| &&
+         |Stornojahr{ gc_tab }Stornobeleg{ gc_tab }Stornozeile| TO gt_lines.
+  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }BWART{ gc_tab }SHKZG{ gc_tab }MENGE{ gc_tab }| &&
+         |BUDAT{ gc_tab }MJAHR{ gc_tab }MBLNR{ gc_tab }ZEILE{ gc_tab }| &&
+         |SJAHR{ gc_tab }SMBLN{ gc_tab }SMBLP| TO gt_lines.
+  PERFORM sheet_put USING gt_lines.
+
+  CLEAR gt_lines.
+  LOOP AT it_mov ASSIGNING FIELD-SYMBOL(<ls_mov>).
+    APPEND |{ <ls_mov>-matnr }{ gc_tab }{ <ls_mov>-werks }{ gc_tab }| &&
+           |{ <ls_mov>-bwart }{ gc_tab }{ <ls_mov>-shkzg }{ gc_tab }| &&
+           |{ <ls_mov>-menge NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mov>-budat DATE = RAW }{ gc_tab }| &&
+           |{ <ls_mov>-mjahr }{ gc_tab }{ <ls_mov>-mblnr }{ gc_tab }| &&
+           |{ <ls_mov>-zeile }{ gc_tab }{ <ls_mov>-sjahr }{ gc_tab }| &&
+           |{ <ls_mov>-smbln }{ gc_tab }{ <ls_mov>-smblp }| TO gt_lines.
+  ENDLOOP.
+  PERFORM sheet_put USING gt_lines.
+  CLEAR gt_lines.
+  PERFORM sheet_close.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM publish_workbook - ein XLSX sammeln oder ZIP vorbereiten
+*&---------------------------------------------------------------------*
+FORM publish_workbook USING iv_xlsx TYPE xstring.
+
+  DATA lv_entry_name TYPE string.
+
+  gv_workbook_count = gv_workbook_count + 1.
+  PERFORM workbook_entry_name USING gv_workbook_count
+                              CHANGING lv_entry_name.
+
+  IF gv_workbook_count = 1.
+    gv_single_xlsx = iv_xlsx.
+    gv_single_name = lv_entry_name.
+  ELSE.
+    IF go_result_zip IS INITIAL.
+      CREATE OBJECT go_result_zip.
+      go_result_zip->add( name = gv_single_name content = gv_single_xlsx ).
+      CLEAR gv_single_xlsx.
+    ENDIF.
+    go_result_zip->add( name = lv_entry_name content = iv_xlsx ).
+  ENDIF.
+
+ENDFORM.
+
+FORM workbook_entry_name USING iv_index TYPE i
+                         CHANGING cv_name TYPE string.
+
+  DATA lv_index TYPE string.
+
+  IF iv_index < 10.
+    lv_index = |00{ iv_index }|.
+  ELSEIF iv_index < 100.
+    lv_index = |0{ iv_index }|.
+  ELSE.
+    lv_index = iv_index.
+    CONDENSE lv_index NO-GAPS.
+  ENDIF.
+
+  cv_name = |stoxion_export_{ lv_index }.xlsx|.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM write_export_result - einzelnes XLSX oder ZIP schreiben
+*&---------------------------------------------------------------------*
+FORM write_export_result.
+
+  DATA: lv_result_file TYPE string,
+        lv_zip         TYPE xstring.
+
+  IF gv_workbook_count = 0.
+    MESSAGE 'Keine Arbeitsmappe fuer XLSX-Erzeugung vorhanden.' TYPE 'E'.
+  ENDIF.
+
+  PERFORM build_workbook_filename CHANGING gv_xlsx_file.
+
+  IF gv_workbook_count = 1.
+    PERFORM write_binary_file USING gv_xlsx_file gv_single_xlsx.
+  ELSE.
+    IF go_result_zip IS INITIAL.
+      MESSAGE 'ZIP-Erzeugung nicht initialisiert.' TYPE 'E'.
+    ENDIF.
+    lv_zip = go_result_zip->save( ).
+    PERFORM build_zip_filename USING gv_xlsx_file
+                               CHANGING lv_result_file.
+    gv_xlsx_file = lv_result_file.
+    PERFORM write_binary_file USING gv_xlsx_file lv_zip.
+  ENDIF.
+
+ENDFORM.
+
+FORM build_zip_filename USING iv_xlsx_file TYPE string
+                        CHANGING cv_zip_file TYPE string.
+
+  DATA: lv_len      TYPE i,
+        lv_base_len TYPE i.
+
+  cv_zip_file = iv_xlsx_file.
+  lv_len = strlen( cv_zip_file ).
+  IF lv_len > 5.
+    lv_base_len = lv_len - 5.
+    cv_zip_file = cv_zip_file(lv_base_len) && '.zip'.
+  ELSE.
+    cv_zip_file = cv_zip_file && '.zip'.
+  ENDIF.
+
+ENDFORM.
+
+FORM write_binary_file USING iv_file    TYPE string
+                             iv_content TYPE xstring.
+
+  DATA lt_bin TYPE solix_tab.
+
+  IF p_serv = 'X'.
+    CALL FUNCTION 'AUTHORITY_CHECK_DATASET'
+      EXPORTING
+        activity         = sabc_act_write
+        filename         = iv_file
+      EXCEPTIONS
+        no_authority     = 1
+        activity_unknown = 2
+        OTHERS           = 3.
+    IF sy-subrc <> 0.
+      MESSAGE |Keine Schreibberechtigung fuer { iv_file }.| TYPE 'E'.
+    ENDIF.
+
+    OPEN DATASET iv_file FOR OUTPUT IN BINARY MODE.
+    IF sy-subrc <> 0.
+      MESSAGE |Datei { iv_file } nicht oeffenbar.| TYPE 'E'.
+    ENDIF.
+    TRANSFER iv_content TO iv_file.
+    CLOSE DATASET iv_file.
+  ELSE.
+    lt_bin = cl_bcs_convert=>xstring_to_solix( iv_xstring = iv_content ).
+    cl_gui_frontend_services=>gui_download(
+      EXPORTING
+        bin_filesize = xstrlen( iv_content )
+        filename     = iv_file
+        filetype     = 'BIN'
+      CHANGING
+        data_tab     = lt_bin
+      EXCEPTIONS
+        OTHERS       = 1 ).
+    IF sy-subrc <> 0.
+      MESSAGE |Download { iv_file } fehlgeschlagen (rc={ sy-subrc }).|
+        TYPE 'E'.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.
 
 *&---------------------------------------------------------------------*
 *& Sheet-Writer: Reiter sammeln, am Ende als eine XLSX schreiben
@@ -660,7 +1037,7 @@ ENDFORM.
 FORM validate_target_path.
 
   IF p_path IS INITIAL.
-    MESSAGE 'Bitte Zielordner oder XLSX-Datei angeben.' TYPE 'E'.
+    MESSAGE 'Bitte Zielordner, XLSX- oder ZIP-Datei angeben.' TYPE 'E'.
   ENDIF.
 
   IF p_serv = 'X' AND ( p_path CS ':\' OR p_path CS ':/' ).
@@ -679,11 +1056,16 @@ FORM build_workbook_filename CHANGING cv_file TYPE string.
 
   cv_file = p_path.
   IF cv_file IS INITIAL.
-    MESSAGE 'Bitte Zielordner oder XLSX-Datei angeben.' TYPE 'E'.
+    MESSAGE 'Bitte Zielordner, XLSX- oder ZIP-Datei angeben.' TYPE 'E'.
   ENDIF.
 
   DATA(lv_lower) = to_lower( val = cv_file ).
   IF lv_lower CP '*.xlsx'.
+    RETURN.
+  ENDIF.
+  IF lv_lower CP '*.zip'.
+    DATA(lv_zip_base_len) = strlen( cv_file ) - 4.
+    cv_file = cv_file(lv_zip_base_len) && '.xlsx'.
     RETURN.
   ENDIF.
 
@@ -700,8 +1082,7 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM write_xlsx_workbook.
 
-  DATA: lv_xlsx TYPE xstring,
-        lt_bin  TYPE solix_tab.
+  DATA lv_xlsx TYPE xstring.
 
   IF gt_sheets IS INITIAL.
     MESSAGE 'Keine Reiterdaten fuer XLSX-Erzeugung vorhanden.' TYPE 'E'.
@@ -709,42 +1090,7 @@ FORM write_xlsx_workbook.
 
   PERFORM build_workbook_filename CHANGING gv_xlsx_file.
   PERFORM build_xlsx_zip CHANGING lv_xlsx.
-
-  IF p_serv = 'X'.
-    CALL FUNCTION 'AUTHORITY_CHECK_DATASET'
-      EXPORTING
-        activity         = sabc_act_write
-        filename         = gv_xlsx_file
-      EXCEPTIONS
-        no_authority     = 1
-        activity_unknown = 2
-        OTHERS           = 3.
-    IF sy-subrc <> 0.
-      MESSAGE |Keine Schreibberechtigung fuer { gv_xlsx_file }.| TYPE 'E'.
-    ENDIF.
-
-    OPEN DATASET gv_xlsx_file FOR OUTPUT IN BINARY MODE.
-    IF sy-subrc <> 0.
-      MESSAGE |Datei { gv_xlsx_file } nicht oeffenbar.| TYPE 'E'.
-    ENDIF.
-    TRANSFER lv_xlsx TO gv_xlsx_file.
-    CLOSE DATASET gv_xlsx_file.
-  ELSE.
-    lt_bin = cl_bcs_convert=>xstring_to_solix( iv_xstring = lv_xlsx ).
-    cl_gui_frontend_services=>gui_download(
-      EXPORTING
-        bin_filesize = xstrlen( lv_xlsx )
-        filename     = gv_xlsx_file
-        filetype     = 'BIN'
-      CHANGING
-        data_tab     = lt_bin
-      EXCEPTIONS
-        OTHERS       = 1 ).
-    IF sy-subrc <> 0.
-      MESSAGE |Download { gv_xlsx_file } fehlgeschlagen (rc={ sy-subrc }).|
-        TYPE 'E'.
-    ENDIF.
-  ENDIF.
+  PERFORM write_binary_file USING gv_xlsx_file lv_xlsx.
 
 ENDFORM.
 
