@@ -45,6 +45,23 @@
 *&   - MARA/MARC/MBEW werden je Arbeitsmappe auf das jeweilige
 *&     Material/Werk-Paket eingeschraenkt
 *&
+*& Version 6 - Aenderungen ggue. v5:
+*&   - Dialog/Job-Konsistenz: Datums-/BWART-Defaults werden nur noch
+*&     im Dialog gesetzt (sy-batch-Guard). Bei SUBMIT ... VIA JOB
+*&     laeuft INITIALIZATION vor der Uebernahme der Selektionstabelle;
+*&     eine bewusst geleerte Selektion wuerde sonst im Job
+*&     stillschweigend re-defaulted.
+*&   - Max. Zeilen je Arbeitsmappe parametrisierbar (P_MAXROW,
+*&     Default 500.000, Obergrenze Excel-Limit) zur Begrenzung des
+*&     Speicherbedarfs je Arbeitsmappe
+*&   - Server-Export: ab der zweiten Arbeitsmappe wird jede Mappe
+*&     sofort als nummerierte Datei geschrieben (kein Sammel-ZIP im
+*&     Speicher). ZIP-Buendelung nur noch beim Frontend-Download.
+*&   - Fortschrittsmeldung je Arbeitsmappe im Job-Log (sy-batch)
+*&   - Pfadbehandlung robuster: gemischte Separatoren am Pfadende,
+*&     UNC-Pfade (\\server\share) werden fuer Server-Export abgewiesen
+*&   - Toter Code entfernt (FORM write_xlsx_workbook, TYPE-POOLS sabc)
+*&
 *& Release  : Min. NW 7.40 (Inline-Deklarationen).
 *&            Lauffaehig auf ECC 6.0 und S/4HANA.
 *&
@@ -54,6 +71,11 @@
 *&            (z.B. via CG3Y).
 *&            Datenschutz: Es werden KEINE personenbezogenen Daten
 *&            exportiert (kein Benutzername aus MKPF o.ae.).
+*&            Performance ECC 6.0: Vor dem Voll-Export pruefen, ob ein
+*&            Sekundaerindex auf MSEG (MATNR/WERKS, Standardindex
+*&            MSEG~M ab hoeheren EhPs) vorhanden ist, sonst koennen
+*&            die paketierten Bewegungs-Selects teuer werden. Auf
+*&            S/4HANA (MATDOC) unkritisch.
 *&
 *& Hard-Filter (per Checkbox, default aktiv):
 *&   - Material/Werk-Kombinationen mit Dispobereich (MDMA) entfernt
@@ -69,11 +91,10 @@
 REPORT zstoxion_export.
 
 TABLES: mara, marc, mseg, mkpf, sscrfields.
-TYPE-POOLS: sabc.
 
 CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
            gc_chunk          TYPE i VALUE 250,      "Material/Werk je Bewegungs-Paket
-           gc_excel_max_rows TYPE i VALUE 1048576.  "Excel-Zeilenlimit je Sheet
+           gc_excel_max_rows TYPE i VALUE 1048576.  "Excel-Zeilenlimit (Obergrenze P_MAXROW)
 
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
@@ -105,6 +126,7 @@ SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_t_tgt.
               p_serv  RADIOBUTTON GROUP rb.             "Applikationsserver
   PARAMETERS: p_path  TYPE string LOWER CASE
                       DEFAULT 'C:\stoxion\stoxion_export.xlsx'. "Ziel
+  PARAMETERS: p_maxrow TYPE i DEFAULT 500000.  "Max. Zeilen je Arbeitsmappe
 SELECTION-SCREEN END OF BLOCK b4.
 
 *----------------------------------------------------------------------*
@@ -237,23 +259,31 @@ INITIALIZATION.
   %_p_front_%_app_%-text = 'Frontend-Download / Frontend download'.
   %_p_serv_%_app_%-text = 'Applikationsserver / Application server'.
   %_p_path_%_app_%-text = 'Zielordner, XLSX- oder ZIP-Datei / Target folder, XLSX or ZIP file'.
+  %_p_maxrow_%_app_%-text = 'Max. Zeilen je Arbeitsmappe / Max rows per workbook'.
 
-  s_budat-sign   = 'I'.
-  s_budat-option = 'BT'.
-  s_budat-low    = sy-datum - 730.
-  s_budat-high   = sy-datum.
-  APPEND s_budat.
+  " Defaults nur im Dialog setzen: Bei SUBMIT ... VIA JOB laeuft
+  " INITIALIZATION vor der Uebernahme der Selektionstabelle, und
+  " RS_REFRESH_FROM_SELECTOPTIONS liefert fuer leere Select-Options
+  " keine Zeilen. Eine im Dialog bewusst geleerte Selektion (z.B.
+  " "alle Bewegungsarten") wuerde im Job sonst still re-defaulted.
+  IF sy-batch IS INITIAL.
+    s_budat-sign   = 'I'.
+    s_budat-option = 'BT'.
+    s_budat-low    = sy-datum - 730.
+    s_budat-high   = sy-datum.
+    APPEND s_budat.
 
-  " MVP verarbeitet Nachfragebewegungen aus diesen BWARTs.
-  s_bwart-sign   = 'I'.
-  s_bwart-option = 'EQ'.
-  s_bwart-low    = '201'. APPEND s_bwart.
-  s_bwart-low    = '261'. APPEND s_bwart.
-  s_bwart-low    = '281'. APPEND s_bwart.
-  s_bwart-low    = '601'. APPEND s_bwart.
-  s_bwart-low    = '641'. APPEND s_bwart.
-  s_bwart-low    = '643'. APPEND s_bwart.
-  s_bwart-low    = '645'. APPEND s_bwart.
+    " MVP verarbeitet Nachfragebewegungen aus diesen BWARTs.
+    s_bwart-sign   = 'I'.
+    s_bwart-option = 'EQ'.
+    s_bwart-low    = '201'. APPEND s_bwart.
+    s_bwart-low    = '261'. APPEND s_bwart.
+    s_bwart-low    = '281'. APPEND s_bwart.
+    s_bwart-low    = '601'. APPEND s_bwart.
+    s_bwart-low    = '641'. APPEND s_bwart.
+    s_bwart-low    = '643'. APPEND s_bwart.
+    s_bwart-low    = '645'. APPEND s_bwart.
+  ENDIF.
 
 *----------------------------------------------------------------------*
 AT SELECTION-SCREEN.
@@ -275,6 +305,7 @@ START-OF-SELECTION.
   ENDIF.
 
   PERFORM validate_target_path.
+  PERFORM validate_max_rows.
 
 * --- 0) Werke aufloesen, Berechtigungen, Org-Daten --------------------
   SELECT werks, bwkey FROM t001w
@@ -419,7 +450,7 @@ START-OF-SELECTION.
 *----------------------------------------------------------------------*
 * 6) Ausgabe je Reiter erzeugen
 *----------------------------------------------------------------------*
-* --- MATDOC: Bewegungsdaten paketiert und bei Excel-Grenze aufgeteilt --
+* --- MATDOC: Bewegungsdaten paketiert, Aufteilung am Zeilenlimit -------
 * Bewusst inkl. Stornoreferenzen (SJAHR/SMBLN/SMBLP): die Storno-
 * Bereinigung erfolgt in stoxion, daher hier roh exportieren.
   PERFORM reset_result_writer.
@@ -438,7 +469,7 @@ START-OF-SELECTION.
         lv_book_mov_rows TYPE i,
         lv_max_data_rows TYPE i.
 
-  lv_max_data_rows = gc_excel_max_rows - 2.
+  lv_max_data_rows = p_maxrow - 2.               "2 Kopfzeilen je Reiter
   lv_from = 1.
 
   WHILE lv_from <= lines( gt_marc ).
@@ -506,9 +537,9 @@ START-OF-SELECTION.
       lv_key_rows = lines( lt_key_mov ).
       IF lv_key_rows > lv_max_data_rows.
         MESSAGE |Material/Werk { <ls_key>-matnr }/{ <ls_key>-werks } | &&
-                |ueberschreitet alleine das Excel-Zeilenlimit | &&
+                |ueberschreitet alleine das Zeilenlimit je Arbeitsmappe | &&
                 |({ lv_key_rows } Datenzeilen, max. { lv_max_data_rows }). | &&
-                |Bitte Zeitraum weiter eingrenzen.| TYPE 'E'.
+                |Bitte Zeitraum eingrenzen oder P_MAXROW erhoehen.| TYPE 'E'.
       ENDIF.
 
       IF lt_book_marc IS NOT INITIAL AND
@@ -596,8 +627,9 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
   CLEAR gt_sheets.
 
   LOOP AT it_book_marc ASSIGNING FIELD-SYMBOL(<ls_book_marc>).
+    " gt_plants ist nach WERKS sortiert (START-OF-SELECTION)
     READ TABLE it_plants ASSIGNING FIELD-SYMBOL(<ls_book_plant>)
-      WITH KEY werks = <ls_book_marc>-werks.
+      WITH KEY werks = <ls_book_marc>-werks BINARY SEARCH.
     IF sy-subrc = 0.
       APPEND <ls_book_plant> TO lt_book_plants.
     ENDIF.
@@ -811,26 +843,58 @@ FORM build_matdoc_sheet USING it_mov TYPE tt_mov.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM publish_workbook - ein XLSX sammeln oder ZIP vorbereiten
+*& FORM publish_workbook - Arbeitsmappe puffern, streamen oder zippen
+*&---------------------------------------------------------------------*
+*& Server-Export : Erste Mappe wird gepuffert (Einzeldatei-Fall). Ab
+*&                 der zweiten Mappe wird jede Mappe SOFORT als
+*&                 nummerierte Datei geschrieben -> es liegt immer nur
+*&                 eine Arbeitsmappe gleichzeitig im Speicher, kein
+*&                 Sammel-ZIP.
+*& Frontend       : Wie bisher - ein XLSX direkt, mehrere als ZIP
+*&                 (eine Einzeldatei ist fuer den Download praktischer).
 *&---------------------------------------------------------------------*
 FORM publish_workbook USING iv_xlsx TYPE xstring.
 
-  DATA lv_entry_name TYPE string.
+  DATA: lv_entry_name TYPE string,
+        lv_path       TYPE string.
 
   gv_workbook_count = gv_workbook_count + 1.
   PERFORM workbook_entry_name USING gv_workbook_count
                               CHANGING lv_entry_name.
 
-  IF gv_workbook_count = 1.
-    gv_single_xlsx = iv_xlsx.
-    gv_single_name = lv_entry_name.
-  ELSE.
-    IF go_result_zip IS INITIAL.
-      CREATE OBJECT go_result_zip.
-      go_result_zip->add( name = gv_single_name content = gv_single_xlsx ).
-      CLEAR gv_single_xlsx.
+  IF p_serv = 'X'.
+    IF gv_workbook_count = 1.
+      gv_single_xlsx = iv_xlsx.
+      gv_single_name = lv_entry_name.
+    ELSE.
+      IF gv_workbook_count = 2.
+        " Nachholen: gepufferte erste Mappe als _001 schreiben
+        PERFORM server_workbook_path USING 1 CHANGING lv_path.
+        PERFORM write_binary_file USING lv_path gv_single_xlsx.
+        CLEAR gv_single_xlsx.
+      ENDIF.
+      PERFORM server_workbook_path USING gv_workbook_count
+                                   CHANGING lv_path.
+      PERFORM write_binary_file USING lv_path iv_xlsx.
     ENDIF.
-    go_result_zip->add( name = lv_entry_name content = iv_xlsx ).
+  ELSE.
+    IF gv_workbook_count = 1.
+      gv_single_xlsx = iv_xlsx.
+      gv_single_name = lv_entry_name.
+    ELSE.
+      IF go_result_zip IS INITIAL.
+        CREATE OBJECT go_result_zip.
+        go_result_zip->add( name = gv_single_name content = gv_single_xlsx ).
+        CLEAR gv_single_xlsx.
+      ENDIF.
+      go_result_zip->add( name = lv_entry_name content = iv_xlsx ).
+    ENDIF.
+  ENDIF.
+
+  " Fortschritt ins Job-Log; im Dialog wuerden S-Messages nur die
+  " Abschlussmeldung in der Statuszeile ueberschreiben
+  IF sy-batch = 'X'.
+    MESSAGE |Arbeitsmappe { gv_workbook_count } erzeugt.| TYPE 'S'.
   ENDIF.
 
 ENDFORM.
@@ -838,46 +902,66 @@ ENDFORM.
 FORM workbook_entry_name USING iv_index TYPE i
                          CHANGING cv_name TYPE string.
 
-  DATA lv_index TYPE string.
-
-  IF iv_index < 10.
-    lv_index = |00{ iv_index }|.
-  ELSEIF iv_index < 100.
-    lv_index = |0{ iv_index }|.
-  ELSE.
-    lv_index = iv_index.
-    CONDENSE lv_index NO-GAPS.
-  ENDIF.
-
-  cv_name = |stoxion_export_{ lv_index }.xlsx|.
+  cv_name = |stoxion_export_{ iv_index WIDTH = 3 ALIGN = RIGHT PAD = '0' }.xlsx|.
 
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM write_export_result - einzelnes XLSX oder ZIP schreiben
+*& FORM server_workbook_path - nummerierter Zielpfad je Arbeitsmappe
+*&---------------------------------------------------------------------*
+FORM server_workbook_path USING iv_index TYPE i
+                          CHANGING cv_path TYPE string.
+
+  DATA: lv_base     TYPE string,
+        lv_base_len TYPE i.
+
+  PERFORM build_workbook_filename CHANGING lv_base.  "endet immer auf .xlsx
+  lv_base_len = strlen( lv_base ) - 5.
+  cv_path = |{ lv_base(lv_base_len) }| &&
+            |_{ iv_index WIDTH = 3 ALIGN = RIGHT PAD = '0' }.xlsx|.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM write_export_result - Restpuffer schreiben, Zielnamen setzen
 *&---------------------------------------------------------------------*
 FORM write_export_result.
 
   DATA: lv_result_file TYPE string,
+        lv_last_file   TYPE string,
         lv_zip         TYPE xstring.
 
   IF gv_workbook_count = 0.
     MESSAGE 'Keine Arbeitsmappe fuer XLSX-Erzeugung vorhanden.' TYPE 'E'.
   ENDIF.
 
-  PERFORM build_workbook_filename CHANGING gv_xlsx_file.
-
-  IF gv_workbook_count = 1.
-    PERFORM write_binary_file USING gv_xlsx_file gv_single_xlsx.
-  ELSE.
-    IF go_result_zip IS INITIAL.
-      MESSAGE 'ZIP-Erzeugung nicht initialisiert.' TYPE 'E'.
+  IF p_serv = 'X'.
+    IF gv_workbook_count = 1.
+      " Einzelfall: gepufferte Mappe unter dem einfachen Zielnamen
+      PERFORM build_workbook_filename CHANGING gv_xlsx_file.
+      PERFORM write_binary_file USING gv_xlsx_file gv_single_xlsx.
+      CLEAR gv_single_xlsx.
+    ELSE.
+      " Mappen wurden bereits einzeln geschrieben -> nur Anzeigename
+      PERFORM server_workbook_path USING 1 CHANGING gv_xlsx_file.
+      PERFORM server_workbook_path USING gv_workbook_count
+                                   CHANGING lv_last_file.
+      gv_xlsx_file = |{ gv_xlsx_file } bis { lv_last_file }|.
     ENDIF.
-    lv_zip = go_result_zip->save( ).
-    PERFORM build_zip_filename USING gv_xlsx_file
-                               CHANGING lv_result_file.
-    gv_xlsx_file = lv_result_file.
-    PERFORM write_binary_file USING gv_xlsx_file lv_zip.
+  ELSE.
+    PERFORM build_workbook_filename CHANGING gv_xlsx_file.
+    IF gv_workbook_count = 1.
+      PERFORM write_binary_file USING gv_xlsx_file gv_single_xlsx.
+    ELSE.
+      IF go_result_zip IS INITIAL.
+        MESSAGE 'ZIP-Erzeugung nicht initialisiert.' TYPE 'E'.
+      ENDIF.
+      lv_zip = go_result_zip->save( ).
+      PERFORM build_zip_filename USING gv_xlsx_file
+                                 CHANGING lv_result_file.
+      gv_xlsx_file = lv_result_file.
+      PERFORM write_binary_file USING gv_xlsx_file lv_zip.
+    ENDIF.
   ENDIF.
 
 ENDFORM.
@@ -1035,9 +1119,27 @@ FORM validate_target_path.
     MESSAGE 'Bitte Zielordner, XLSX- oder ZIP-Datei angeben.' TYPE 'E'.
   ENDIF.
 
-  IF p_serv = 'X' AND ( p_path CS ':\' OR p_path CS ':/' ).
+  IF p_serv = 'X' AND ( p_path CS ':\' OR p_path CS ':/' OR
+                        p_path CP '\\*' ).
     MESSAGE 'Fuer Server-Export bitte AL11-/Unix-Pfad angeben, ' &&
-            'z.B. /tmp/stoxion/stoxion_export.xlsx.' TYPE 'E'.
+            'z.B. /tmp/stoxion/stoxion_export.xlsx (kein lokales ' &&
+            'Laufwerk, keine UNC-Freigabe).' TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM validate_max_rows - Zeilenlimit je Arbeitsmappe pruefen
+*&---------------------------------------------------------------------*
+FORM validate_max_rows.
+
+  IF p_maxrow < 1000.
+    MESSAGE 'Max. Zeilen je Arbeitsmappe: mindestens 1.000 angeben.'
+      TYPE 'E'.
+  ENDIF.
+  IF p_maxrow > gc_excel_max_rows.
+    MESSAGE |Max. Zeilen je Arbeitsmappe: hoechstens | &&
+            |{ gc_excel_max_rows } (Excel-Limit je Sheet).| TYPE 'E'.
   ENDIF.
 
 ENDFORM.
@@ -1064,28 +1166,13 @@ FORM build_workbook_filename CHANGING cv_file TYPE string.
     RETURN.
   ENDIF.
 
+  " Beide Separatoren pruefen: 'C:/stoxion/' am Frontend soll nicht
+  " zu 'C:/stoxion/\stoxion_export.xlsx' fuehren
   DATA(lv_len) = strlen( cv_file ) - 1.
-  IF cv_file+lv_len(1) <> lv_sep.
+  IF cv_file+lv_len(1) <> '\' AND cv_file+lv_len(1) <> '/'.
     cv_file = cv_file && lv_sep.
   ENDIF.
   cv_file = |{ cv_file }stoxion_export.xlsx|.
-
-ENDFORM.
-
-*&---------------------------------------------------------------------*
-*& FORM write_xlsx_workbook - Workbook erzeugen und binaer speichern
-*&---------------------------------------------------------------------*
-FORM write_xlsx_workbook.
-
-  DATA lv_xlsx TYPE xstring.
-
-  IF gt_sheets IS INITIAL.
-    MESSAGE 'Keine Reiterdaten fuer XLSX-Erzeugung vorhanden.' TYPE 'E'.
-  ENDIF.
-
-  PERFORM build_workbook_filename CHANGING gv_xlsx_file.
-  PERFORM build_xlsx_zip CHANGING lv_xlsx.
-  PERFORM write_binary_file USING gv_xlsx_file lv_xlsx.
 
 ENDFORM.
 
@@ -1280,11 +1367,11 @@ FORM schedule_job.
     ENDCASE.
   ENDLOOP.
 
-  " Plausibilitaet: Pfad sollte ein Server-Pfad sein
-  IF p_path CS ':\' OR p_path CS ':/'.
-    MESSAGE 'Hinweis: Fuer den Job einen Server-Pfad (AL11) angeben, ' &&
-            'z.B. /tmp/stoxion/ - aktueller Pfad sieht nach lokalem ' &&
-            'Laufwerk aus.' TYPE 'E'.
+  " Plausibilitaet: Pfad muss ein Server-Pfad sein
+  IF p_path CS ':\' OR p_path CS ':/' OR p_path CP '\\*'.
+    MESSAGE 'Fuer den Job einen Server-Pfad (AL11) angeben, ' &&
+            'z.B. /tmp/stoxion/ - der aktuelle Pfad zeigt auf ein ' &&
+            'lokales Laufwerk oder eine Netzwerkfreigabe.' TYPE 'E'.
   ENDIF.
 
   lv_jobname = |ZSTOXION_{ sy-datum }_{ sy-uzeit }|.
