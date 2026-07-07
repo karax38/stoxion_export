@@ -75,17 +75,17 @@ CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horiz
            gc_chunk          TYPE i VALUE 250,      "Material/Werk je Bewegungs-Paket
            gc_excel_max_rows TYPE i VALUE 1048576.  "Excel-Zeilenlimit je Sheet
 
-DATA: gv_title_org    TYPE c LENGTH 70,
-      gv_title_mov    TYPE c LENGTH 70,
-      gv_title_filter TYPE c LENGTH 70,
-      gv_title_target TYPE c LENGTH 70.
+DATA: gv_t_org TYPE c LENGTH 70,
+      gv_t_mov TYPE c LENGTH 70,
+      gv_t_flt TYPE c LENGTH 70,
+      gv_t_tgt TYPE c LENGTH 70.
 
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
 *----------------------------------------------------------------------*
 SELECTION-SCREEN FUNCTION KEY 1.                "Job-Button
 
-SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE gv_title_org.
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE gv_t_org.
   SELECT-OPTIONS: s_werks FOR marc-werks OBLIGATORY,   "Werk(e)
                   s_matnr FOR mara-matnr,              "Material
                   s_mtart FOR mara-mtart,              "Materialart
@@ -94,18 +94,18 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE gv_title_org.
                   s_maabc FOR marc-maabc.              "ABC-Kennzeichen
 SELECTION-SCREEN END OF BLOCK b1.
 
-SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_title_mov.
+SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_t_mov.
   SELECT-OPTIONS: s_budat FOR mkpf-budat OBLIGATORY,  "Buchungsdatum
                   s_bwart FOR mseg-bwart,              "Bewegungsart (MVP-Default)
                   s_sobkz FOR mseg-sobkz.              "Sonderbestand (opt.)
 SELECTION-SCREEN END OF BLOCK b2.
 
-SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE gv_title_filter.
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE gv_t_flt.
   PARAMETERS: p_fmrp AS CHECKBOX DEFAULT 'X',          "Filter Dispobereich
               p_fuom AS CHECKBOX DEFAULT 'X'.          "Filter alt. ME
 SELECTION-SCREEN END OF BLOCK b3.
 
-SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_title_target.
+SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_t_tgt.
   PARAMETERS: p_front RADIOBUTTON GROUP rb DEFAULT 'X', "Frontend-Download
               p_serv  RADIOBUTTON GROUP rb.             "Applikationsserver
   PARAMETERS: p_path  TYPE string LOWER CASE
@@ -223,10 +223,10 @@ INITIALIZATION.
 *----------------------------------------------------------------------*
   sscrfields-functxt_01 = 'Job einplanen / Schedule job'.
 
-  gv_title_org    = 'Organisation und Material / Organization and material'.
-  gv_title_mov    = 'Bewegungsdaten / Movement data'.
-  gv_title_filter = 'Ausschlussfilter / Exclusion filters'.
-  gv_title_target = 'Exportziel / Export target'.
+  gv_t_org = 'Organisation und Material / Organization and material'.
+  gv_t_mov = 'Bewegungsdaten / Movement data'.
+  gv_t_flt = 'Ausschlussfilter / Exclusion filters'.
+  gv_t_tgt = 'Exportziel / Export target'.
 
   %_s_werks_%_app_%-text = 'Werk(e) / Plant(s)'.
   %_s_matnr_%_app_%-text = 'Material / Material'.
