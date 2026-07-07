@@ -96,11 +96,6 @@ CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horiz
            gc_chunk          TYPE i VALUE 250,      "Material/Werk je Bewegungs-Paket
            gc_excel_max_rows TYPE i VALUE 1048576.  "Excel-Zeilenlimit (Obergrenze P_MAXROW)
 
-DATA: gv_t_org TYPE c LENGTH 70,
-      gv_t_mov TYPE c LENGTH 70,
-      gv_t_flt TYPE c LENGTH 70,
-      gv_t_tgt TYPE c LENGTH 70.
-
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
 *----------------------------------------------------------------------*
@@ -179,8 +174,8 @@ TYPES: BEGIN OF ty_plant,
          mblnr TYPE mblnr,
          zeile TYPE mblpo,
          sjahr TYPE gjahr,
-         smbln TYPE smbln,
-         smblp TYPE smblp,
+         smbln TYPE mseg-smbln,
+         smblp TYPE mseg-smblp,
        END OF ty_mov,
        BEGIN OF ty_mbew,
          matnr TYPE mbew-matnr,
@@ -399,17 +394,20 @@ START-OF-SELECTION.
 
 * --- 3) Hard-Filter: alternative Mengeneinheiten (DB-Join) ------------
   IF p_fuom = 'X'.
+    DATA lt_altuom TYPE SORTED TABLE OF mara-matnr
+                         WITH UNIQUE KEY table_line.
+
     SELECT DISTINCT m~matnr
       FROM marm AS m
       INNER JOIN mara AS a ON a~matnr = m~matnr
-      INTO TABLE @DATA(lt_altuom)
+      INTO TABLE @lt_altuom
       FOR ALL ENTRIES IN @gt_marc
       WHERE m~matnr =  @gt_marc-matnr
         AND m~meinh <> a~meins.
-    SORT lt_altuom.
+
     LOOP AT gt_marc ASSIGNING <ls_marc>.
       READ TABLE lt_altuom TRANSPORTING NO FIELDS
-        WITH KEY table_line = <ls_marc>-matnr BINARY SEARCH.
+        WITH TABLE KEY table_line = <ls_marc>-matnr.
       IF sy-subrc = 0.
         CLEAR <ls_marc>-matnr.
       ENDIF.
@@ -752,7 +750,7 @@ FORM build_common_sheets USING it_plants TYPE tt_plant
     READ TABLE it_plants TRANSPORTING NO FIELDS
       WITH KEY werks = <ls_t399d>-werks.
     IF sy-subrc = 0.
-      APPEND |{ <ls_t399d>-werks }{ gc_tab }{ <ls_t399d>-bztek NUMBER = RAW }|
+      APPEND |{ <ls_t399d>-werks }{ gc_tab }{ <ls_t399d>-bztek }|
         TO gt_lines.
     ENDIF.
   ENDLOOP.
