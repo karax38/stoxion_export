@@ -75,11 +75,6 @@ CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horiz
            gc_chunk          TYPE i VALUE 250,      "Material/Werk je Bewegungs-Paket
            gc_excel_max_rows TYPE i VALUE 1048576.  "Excel-Zeilenlimit je Sheet
 
-DATA: gv_t_org TYPE c LENGTH 70,
-      gv_t_mov TYPE c LENGTH 70,
-      gv_t_flt TYPE c LENGTH 70,
-      gv_t_tgt TYPE c LENGTH 70.
-
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
 *----------------------------------------------------------------------*
