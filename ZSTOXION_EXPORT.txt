@@ -9,7 +9,15 @@
 *&           "Soll-Sicherheitsbestand_Template.xlsx".
 *&
 *& Reiter   : T001, T001W, T006, T134, V438A, V_399D_E,
-*&            MARA, MATDOC, MARC, MBEW
+*&            MARA, MARC, MDMA, MDLV, MATDOC, MBEW
+*&
+*& Version 1.1 - Aenderungen fuer stoxion-App 1.1:
+*&   - Dispobereiche werden nicht mehr ausgeschlossen, sondern ueber
+*&     MARC-DIBER gekennzeichnet und per MDMA/MDLV exportiert
+*&   - MATDOC enthaelt LGORT zur Zuordnung von Bewegungen zu
+*&     Dispobereichen; Stornoreferenzen inkl. SMBLP bleiben vollstaendig
+*&   - Alle Worksheets frieren die ersten zwei Zeilen ein und setzen
+*&     AutoFilter von Zeile 2 bis zur letzten ausgegebenen Spalte
 *&
 *& Version 2 - Aenderungen ggue. v1:
 *&   - Mehrere Werke je Lauf (S_WERKS), alle in einem Dateisatz
@@ -77,13 +85,15 @@
 *&            die paketierten Bewegungs-Selects teuer werden. Auf
 *&            S/4HANA (MATDOC) unkritisch.
 *&
-*& Hard-Filter (per Checkbox, default aktiv):
-*&   - Material/Werk-Kombinationen mit Dispobereich (MDMA) entfernt
+*& Filter/Optionen (per Checkbox):
+*&   - Material/Werk-Kombinationen mit Dispobereich (MDMA) werden
+*&     in Version 1.1 exportiert und ueber MARC-DIBER gekennzeichnet
 *&   - Materialien mit alternativen Mengeneinheiten (MARM-Satz mit
 *&     MEINH <> Basis-ME) komplett entfernt
 *&
 *& Formatkontrakt (stoxion-Parser):
 *&   - XLSX-Arbeitsmappe(n), ein Reiter je Template-Reiter, 2 Kopfzeilen
+*&   - Freeze Panes unter Zeile 2, AutoFilter auf Zeile 2 bis Datenende
 *&   - Datum roh als JJJJMMTT, Mengen/Preise mit '.' als Dezimaltrenner,
 *&     MATNR mit fuehrenden Nullen
 *&   - Zellen als Text geschrieben, damit IDs unveraendert bleiben
@@ -117,7 +127,7 @@ SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_t_mov.
 SELECTION-SCREEN END OF BLOCK b2.
 
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE gv_t_flt.
-  PARAMETERS: p_fmrp AS CHECKBOX DEFAULT 'X',          "Filter Dispobereich
+  PARAMETERS: p_fmrp AS CHECKBOX DEFAULT 'X',          "1.1: Dispobereiche immer exportieren
               p_fuom AS CHECKBOX DEFAULT 'X'.          "Filter alt. ME
 SELECTION-SCREEN END OF BLOCK b3.
 
@@ -141,6 +151,7 @@ TYPES: BEGIN OF ty_plant,
        BEGIN OF ty_marc,
          matnr TYPE marc-matnr,
          werks TYPE marc-werks,
+         diber TYPE c LENGTH 1,
          bwkey TYPE t001w-bwkey,
          lvorm TYPE marc-lvorm,
          dismm TYPE marc-dismm,
@@ -166,6 +177,7 @@ TYPES: BEGIN OF ty_plant,
        BEGIN OF ty_mov,
          matnr TYPE matnr,
          werks TYPE werks_d,
+         lgort TYPE lgort_d,
          bwart TYPE bwart,
          shkzg TYPE shkzg,
          menge TYPE menge_d,
@@ -177,6 +189,23 @@ TYPES: BEGIN OF ty_plant,
          smbln TYPE mseg-smbln,
          smblp TYPE mseg-smblp,
        END OF ty_mov,
+       BEGIN OF ty_mdma,
+         matnr TYPE mdma-matnr,
+         berid TYPE mdma-berid,
+         werks TYPE mdma-werks,
+         dismm TYPE mdma-dismm,
+         eisbe TYPE mdma-eisbe,
+         plifz TYPE mdma-plifz,
+         pstat TYPE mdma-pstat,
+       END OF ty_mdma,
+       BEGIN OF ty_mdlv,
+         berid TYPE c LENGTH 10,
+         berty TYPE c LENGTH 1,
+         bertx TYPE c LENGTH 40,
+         werks TYPE werks_d,
+         lgort TYPE lgort_d,
+         configdeprecationcode TYPE string,
+       END OF ty_mdlv,
        BEGIN OF ty_mbew,
          matnr TYPE mbew-matnr,
          bwkey TYPE mbew-bwkey,
@@ -206,6 +235,8 @@ TYPES: BEGIN OF ty_plant,
        tt_mara  TYPE STANDARD TABLE OF ty_mara  WITH DEFAULT KEY,
        tt_key   TYPE STANDARD TABLE OF ty_marc_key WITH DEFAULT KEY,
        tt_mov   TYPE STANDARD TABLE OF ty_mov   WITH DEFAULT KEY,
+       tt_mdma  TYPE STANDARD TABLE OF ty_mdma  WITH DEFAULT KEY,
+       tt_mdlv  TYPE STANDARD TABLE OF ty_mdlv  WITH DEFAULT KEY,
        tt_mbew  TYPE STANDARD TABLE OF ty_mbew  WITH DEFAULT KEY,
        tt_t006  TYPE STANDARD TABLE OF ty_t006  WITH DEFAULT KEY,
        tt_t134  TYPE STANDARD TABLE OF ty_t134  WITH DEFAULT KEY,
@@ -244,7 +275,7 @@ INITIALIZATION.
 
       gv_t_org = 'Organisation und Material'.
       gv_t_mov = 'Bewegungsdaten'.
-      gv_t_flt = 'Ausschlussfilter'.
+      gv_t_flt = 'Filter und Dispobereiche'.
       gv_t_tgt = 'Exportziel'.
 
       %_s_werks_%_app_%-text = 'Werk(e)'.
@@ -256,7 +287,7 @@ INITIALIZATION.
       %_s_budat_%_app_%-text = 'Buchungsdatum'.
       %_s_bwart_%_app_%-text = 'Bewegungsart'.
       %_s_sobkz_%_app_%-text = 'Sonderbestand'.
-      %_p_fmrp_%_app_%-text = 'Dispobereiche ausschliessen'.
+      %_p_fmrp_%_app_%-text = 'Dispobereiche immer exportieren (1.1)'.
       %_p_fuom_%_app_%-text = 'Alternative ME ausschliessen'.
       %_p_front_%_app_%-text = 'Frontend-Download'.
       %_p_serv_%_app_%-text = 'Applikationsserver'.
@@ -268,7 +299,7 @@ INITIALIZATION.
 
       gv_t_org = 'Organization and material'.
       gv_t_mov = 'Movement data'.
-      gv_t_flt = 'Exclusion filters'.
+      gv_t_flt = 'Filters and MRP areas'.
       gv_t_tgt = 'Export target'.
 
       %_s_werks_%_app_%-text = 'Plant(s)'.
@@ -280,7 +311,7 @@ INITIALIZATION.
       %_s_budat_%_app_%-text = 'Posting date'.
       %_s_bwart_%_app_%-text = 'Movement type'.
       %_s_sobkz_%_app_%-text = 'Special stock'.
-      %_p_fmrp_%_app_%-text = 'Exclude MRP areas'.
+      %_p_fmrp_%_app_%-text = 'Always export MRP areas (1.1)'.
       %_p_fuom_%_app_%-text = 'Exclude alternative UoM'.
       %_p_front_%_app_%-text = 'Frontend download'.
       %_p_serv_%_app_%-text = 'Application server'.
@@ -399,7 +430,6 @@ START-OF-SELECTION.
     WHERE c~werks IN @s_werks
       AND c~matnr IN @s_matnr
       AND c~lvorm =  @space
-      AND c~dismm IN @s_dismm
       AND c~maabc IN @s_maabc
       AND a~mtart IN @s_mtart
       AND a~matkl IN @s_matkl
@@ -417,26 +447,49 @@ START-OF-SELECTION.
     ENDIF.
   ENDLOOP.
 
-* --- 2) Hard-Filter: Dispobereich (MDMA, je Material/Werk) ------------
-  IF p_fmrp = 'X'.
-    SELECT matnr, werks FROM mdma
-      INTO TABLE @DATA(lt_mdma)
-      FOR ALL ENTRIES IN @gt_marc
-      WHERE matnr = @gt_marc-matnr
-        AND werks = @gt_marc-werks.
-    SORT lt_mdma BY matnr werks.
-    DELETE ADJACENT DUPLICATES FROM lt_mdma COMPARING matnr werks.
+* --- 2) Dispobereiche (MDMA, je Material/Werk) fuer App 1.1 -----------
+  DATA lt_mdma TYPE tt_mdma.
+  SELECT matnr, berid, werks, dismm, eisbe, plifz, pstat
+    FROM mdma
+    INTO CORRESPONDING FIELDS OF TABLE @lt_mdma
+    FOR ALL ENTRIES IN @gt_marc
+    WHERE matnr = @gt_marc-matnr
+      AND werks = @gt_marc-werks.
+  SORT lt_mdma BY matnr werks berid.
+
+  LOOP AT gt_marc ASSIGNING <ls_marc>.
+    READ TABLE lt_mdma TRANSPORTING NO FIELDS
+      WITH KEY matnr = <ls_marc>-matnr
+               werks = <ls_marc>-werks BINARY SEARCH.
+    IF sy-subrc = 0.
+      <ls_marc>-diber = 'X'.
+    ENDIF.
+  ENDLOOP.
+
+  IF s_dismm[] IS NOT INITIAL.
     LOOP AT gt_marc ASSIGNING <ls_marc>.
-      READ TABLE lt_mdma TRANSPORTING NO FIELDS
-        WITH KEY matnr = <ls_marc>-matnr
-                 werks = <ls_marc>-werks BINARY SEARCH.
-      IF sy-subrc = 0.
+      DATA(lv_keep_mrp) = abap_false.
+
+      IF <ls_marc>-diber = 'X'.
+        LOOP AT lt_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma_filter>)
+             WHERE matnr = <ls_marc>-matnr
+               AND werks = <ls_marc>-werks.
+          IF <ls_mdma_filter>-dismm IN s_dismm.
+            lv_keep_mrp = abap_true.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+      ELSEIF <ls_marc>-dismm IN s_dismm.
+        lv_keep_mrp = abap_true.
+      ENDIF.
+
+      IF lv_keep_mrp = abap_false.
         CLEAR <ls_marc>-matnr.          "markieren zum Loeschen
       ENDIF.
     ENDLOOP.
     DELETE gt_marc WHERE matnr IS INITIAL.
     IF gt_marc IS INITIAL.
-      MESSAGE 'Nach Dispobereich-Filter keine Materialien uebrig.'
+      MESSAGE 'Nach Dispomerkmal-Filter keine Materialien uebrig.'
         TYPE 'E'.
     ENDIF.
   ENDIF.
@@ -486,7 +539,8 @@ START-OF-SELECTION.
   DATA: lt_t006  TYPE tt_t006,
         lt_t134  TYPE tt_t134,
         lt_t438a TYPE tt_t438a,
-        lt_t399d TYPE tt_t399d.
+        lt_t399d TYPE tt_t399d,
+        lt_mdlv  TYPE tt_mdlv.
 
   SELECT msehi, decan FROM t006
     INTO CORRESPONDING FIELDS OF TABLE @lt_t006.
@@ -498,6 +552,7 @@ START-OF-SELECTION.
     INTO CORRESPONDING FIELDS OF TABLE @lt_t399d
     WHERE werks IN @s_werks.
   SORT lt_t399d BY werks.
+  PERFORM load_mdlv CHANGING lt_mdlv.
 
 *----------------------------------------------------------------------*
 * 6) Ausgabe je Reiter erzeugen
@@ -538,7 +593,7 @@ START-OF-SELECTION.
     ENDIF.
 
     CLEAR lt_mov.
-    SELECT m~matnr, m~werks, m~bwart, m~shkzg, m~menge,
+    SELECT m~matnr, m~werks, m~lgort, m~bwart, m~shkzg, m~menge,
            k~budat, m~mjahr, m~mblnr, m~zeile,
            m~sjahr, m~smbln, m~smblp
       FROM mseg AS m
@@ -604,6 +659,8 @@ START-OF-SELECTION.
                                         lt_t134
                                         lt_t438a
                                         lt_t399d
+                                        lt_mdma
+                                        lt_mdlv
                                         lt_mbew.
         CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
       ENDIF.
@@ -630,6 +687,8 @@ START-OF-SELECTION.
                                     lt_t134
                                     lt_t438a
                                     lt_t399d
+                                    lt_mdma
+                                    lt_mdlv
                                     lt_mbew.
     CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
   ENDIF.
@@ -660,6 +719,85 @@ FORM reset_result_writer.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*& FORM load_mdlv - Dispobereich/Lagerort-Zuordnungen laden
+*&---------------------------------------------------------------------*
+FORM load_mdlv CHANGING ct_mdlv TYPE tt_mdlv.
+
+  DATA: lr_struct_descr TYPE REF TO cl_abap_structdescr,
+        lr_type_descr   TYPE REF TO cl_abap_typedescr,
+        lr_table_descr  TYPE REF TO cl_abap_tabledescr,
+        lr_data         TYPE REF TO data,
+        lv_tabname      TYPE string VALUE 'MDLV',
+        ls_mdlv         TYPE ty_mdlv,
+        lv_werks        TYPE werks_d.
+
+  FIELD-SYMBOLS: <lt_raw> TYPE STANDARD TABLE,
+                 <ls_raw> TYPE any,
+                 <lv_any> TYPE any.
+
+  CLEAR ct_mdlv.
+
+  TRY.
+      lr_type_descr = cl_abap_typedescr=>describe_by_name( 'MDLV' ).
+      lr_struct_descr ?= lr_type_descr.
+      lr_table_descr = cl_abap_tabledescr=>create(
+                         p_line_type = lr_struct_descr ).
+      CREATE DATA lr_data TYPE HANDLE lr_table_descr.
+      ASSIGN lr_data->* TO <lt_raw>.
+      IF <lt_raw> IS NOT ASSIGNED.
+        RETURN.
+      ENDIF.
+
+      SELECT * FROM (lv_tabname) INTO TABLE @<lt_raw>.
+    CATCH cx_root.
+      RETURN.
+  ENDTRY.
+
+  LOOP AT <lt_raw> ASSIGNING <ls_raw>.
+    CLEAR: ls_mdlv, lv_werks.
+
+    ASSIGN COMPONENT 'WERKS' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc <> 0.
+      ASSIGN COMPONENT 'WERZG' OF STRUCTURE <ls_raw> TO <lv_any>.
+    ENDIF.
+    IF sy-subrc <> 0.
+      CONTINUE.
+    ENDIF.
+
+    lv_werks = <lv_any>.
+    IF lv_werks IN s_werks.
+      ls_mdlv-werks = lv_werks.
+    ELSE.
+      CONTINUE.
+    ENDIF.
+
+    ASSIGN COMPONENT 'BERID' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc = 0.
+      ls_mdlv-berid = <lv_any>.
+    ENDIF.
+    ASSIGN COMPONENT 'BERTY' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc = 0.
+      ls_mdlv-berty = <lv_any>.
+    ENDIF.
+    ASSIGN COMPONENT 'BERTX' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc = 0.
+      ls_mdlv-bertx = <lv_any>.
+    ENDIF.
+    ASSIGN COMPONENT 'LGORT' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc = 0.
+      ls_mdlv-lgort = <lv_any>.
+    ENDIF.
+
+    ls_mdlv-configdeprecationcode = 'Gültig'.
+    APPEND ls_mdlv TO ct_mdlv.
+  ENDLOOP.
+
+  SORT ct_mdlv BY berid werks lgort.
+  DELETE ADJACENT DUPLICATES FROM ct_mdlv COMPARING berid werks lgort.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *& FORM finalize_workbook - Paket als komplette Arbeitsmappe erzeugen
 *&---------------------------------------------------------------------*
 FORM finalize_workbook USING it_book_marc TYPE tt_marc
@@ -669,10 +807,14 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
                              it_t134      TYPE tt_t134
                              it_t438a     TYPE tt_t438a
                              it_t399d     TYPE tt_t399d
+                             it_mdma_all  TYPE tt_mdma
+                             it_mdlv_all  TYPE tt_mdlv
                              it_mbew_all  TYPE tt_mbew.
 
   DATA: lt_book_plants TYPE tt_plant,
         lt_book_mara   TYPE tt_mara,
+        lt_book_mdma   TYPE tt_mdma,
+        lt_book_mdlv   TYPE tt_mdlv,
         lt_book_mbew   TYPE tt_mbew,
         lv_xlsx        TYPE xstring.
 
@@ -698,6 +840,26 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
   DELETE ADJACENT DUPLICATES FROM lt_book_mara COMPARING matnr.
 
   LOOP AT it_book_marc ASSIGNING <ls_book_marc>.
+    LOOP AT it_mdma_all ASSIGNING FIELD-SYMBOL(<ls_book_mdma_all>)
+         WHERE matnr = <ls_book_marc>-matnr
+           AND werks = <ls_book_marc>-werks.
+      APPEND <ls_book_mdma_all> TO lt_book_mdma.
+    ENDLOOP.
+  ENDLOOP.
+  SORT lt_book_mdma BY matnr werks berid.
+  DELETE ADJACENT DUPLICATES FROM lt_book_mdma COMPARING matnr werks berid.
+
+  LOOP AT it_mdlv_all ASSIGNING FIELD-SYMBOL(<ls_book_mdlv_all>).
+    READ TABLE lt_book_plants TRANSPORTING NO FIELDS
+      WITH KEY werks = <ls_book_mdlv_all>-werks BINARY SEARCH.
+    IF sy-subrc = 0.
+      APPEND <ls_book_mdlv_all> TO lt_book_mdlv.
+    ENDIF.
+  ENDLOOP.
+  SORT lt_book_mdlv BY berid werks lgort.
+  DELETE ADJACENT DUPLICATES FROM lt_book_mdlv COMPARING berid werks lgort.
+
+  LOOP AT it_book_marc ASSIGNING <ls_book_marc>.
     READ TABLE it_mbew_all ASSIGNING FIELD-SYMBOL(<ls_book_mbew>)
       WITH KEY matnr = <ls_book_marc>-matnr
                bwkey = <ls_book_marc>-bwkey
@@ -717,6 +879,8 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
   PERFORM build_master_sheets USING it_book_marc
                                     lt_book_mara
                                     lt_book_mbew.
+  PERFORM build_mrp_area_sheets USING lt_book_mdma
+                                      lt_book_mdlv.
   PERFORM build_matdoc_sheet USING it_book_mov.
   PERFORM reorder_sheets_like_template.
   PERFORM build_xlsx_zip CHANGING lv_xlsx.
@@ -826,15 +990,16 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
 
 * --- MARC ---
   CLEAR gt_lines.
-  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Loeschvormerkung{ gc_tab }| &&
-         |Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
+  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Dispobereich vorhanden{ gc_tab }| &&
+         |Loeschvormerkung{ gc_tab }Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
          |Planlieferzeit (Kalendertage){ gc_tab }Wareneingangsbearbeitungszeit (Werktage){ gc_tab }| &&
          |Pflegestatus (D/E/L){ gc_tab }ABC-Indikator{ gc_tab }Wiederbeschaffungszeit (optional)| TO gt_lines.
-  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
+  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }DIBER{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
          |PLIFZ{ gc_tab }WEBAZ{ gc_tab }PSTAT{ gc_tab }MAABC{ gc_tab }WZEIT| TO gt_lines.
   LOOP AT it_marc ASSIGNING FIELD-SYMBOL(<ls_marc>).
     APPEND |{ <ls_marc>-matnr }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
-           |{ <ls_marc>-lvorm }{ gc_tab }{ <ls_marc>-dismm }{ gc_tab }| &&
+           |{ <ls_marc>-diber }{ gc_tab }{ <ls_marc>-lvorm }{ gc_tab }| &&
+           |{ <ls_marc>-dismm }{ gc_tab }| &&
            |{ <ls_marc>-eisbe NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_marc>-plifz NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_marc>-webaz NUMBER = RAW }{ gc_tab }| &&
@@ -862,6 +1027,42 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*& FORM build_mrp_area_sheets - MDMA/MDLV fuer Dispobereiche
+*&---------------------------------------------------------------------*
+FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma
+                                 it_mdlv TYPE tt_mdlv.
+
+* --- MDMA ---
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Dispobereich{ gc_tab }Werk{ gc_tab }| &&
+         |Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
+         |Planlieferzeit (Kalendertage){ gc_tab }Pflegestatus (D/E/L)| TO gt_lines.
+  APPEND |MATNR{ gc_tab }BERID{ gc_tab }WERKS{ gc_tab }DISMM{ gc_tab }| &&
+         |EISBE{ gc_tab }PLIFZ{ gc_tab }PSTAT| TO gt_lines.
+  LOOP AT it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma>).
+    APPEND |{ <ls_mdma>-matnr }{ gc_tab }{ <ls_mdma>-berid }{ gc_tab }| &&
+           |{ <ls_mdma>-werks }{ gc_tab }{ <ls_mdma>-dismm }{ gc_tab }| &&
+           |{ <ls_mdma>-eisbe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mdma>-plifz NUMBER = RAW }{ gc_tab }{ <ls_mdma>-pstat }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MDMA' gt_lines.
+
+* --- MDLV ---
+  CLEAR gt_lines.
+  APPEND |Dispobereich{ gc_tab }Dispobereichstyp{ gc_tab }Dispobereichstext{ gc_tab }| &&
+         |Werk{ gc_tab }Lagerort{ gc_tab }Konfigurationsstatus| TO gt_lines.
+  APPEND |BERID{ gc_tab }BERTY{ gc_tab }BERTX{ gc_tab }WERKS{ gc_tab }LGORT{ gc_tab }| &&
+         |CONFIGDEPRECATIONCODE| TO gt_lines.
+  LOOP AT it_mdlv ASSIGNING FIELD-SYMBOL(<ls_mdlv>).
+    APPEND |{ <ls_mdlv>-berid }{ gc_tab }{ <ls_mdlv>-berty }{ gc_tab }| &&
+           |{ <ls_mdlv>-bertx }{ gc_tab }{ <ls_mdlv>-werks }{ gc_tab }| &&
+           |{ <ls_mdlv>-lgort }{ gc_tab }{ <ls_mdlv>-configdeprecationcode }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MDLV' gt_lines.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *& FORM build_matdoc_sheet - Bewegungsreiter fuer das Paket
 *&---------------------------------------------------------------------*
 FORM build_matdoc_sheet USING it_mov TYPE tt_mov.
@@ -869,11 +1070,11 @@ FORM build_matdoc_sheet USING it_mov TYPE tt_mov.
   PERFORM sheet_open USING 'MATDOC'.
 
   CLEAR gt_lines.
-  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Bewegungsart{ gc_tab }| &&
+  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Lagerort{ gc_tab }Bewegungsart{ gc_tab }| &&
          |Soll-/Haben-Kennzeichen{ gc_tab }Menge{ gc_tab }Buchungsdatum{ gc_tab }| &&
          |Materialbelegjahr{ gc_tab }Materialbelegnummer{ gc_tab }Belegzeile{ gc_tab }| &&
          |Stornojahr{ gc_tab }Stornobeleg{ gc_tab }Stornozeile| TO gt_lines.
-  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }BWART{ gc_tab }SHKZG{ gc_tab }MENGE{ gc_tab }| &&
+  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }LGORT{ gc_tab }BWART{ gc_tab }SHKZG{ gc_tab }MENGE{ gc_tab }| &&
          |BUDAT{ gc_tab }MJAHR{ gc_tab }MBLNR{ gc_tab }ZEILE{ gc_tab }| &&
          |SJAHR{ gc_tab }SMBLN{ gc_tab }SMBLP| TO gt_lines.
   PERFORM sheet_put USING gt_lines.
@@ -881,7 +1082,8 @@ FORM build_matdoc_sheet USING it_mov TYPE tt_mov.
   CLEAR gt_lines.
   LOOP AT it_mov ASSIGNING FIELD-SYMBOL(<ls_mov>).
     APPEND |{ <ls_mov>-matnr }{ gc_tab }{ <ls_mov>-werks }{ gc_tab }| &&
-           |{ <ls_mov>-bwart }{ gc_tab }{ <ls_mov>-shkzg }{ gc_tab }| &&
+           |{ <ls_mov>-lgort }{ gc_tab }{ <ls_mov>-bwart }{ gc_tab }| &&
+           |{ <ls_mov>-shkzg }{ gc_tab }| &&
            |{ <ls_mov>-menge NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_mov>-budat DATE = RAW }{ gc_tab }| &&
            |{ <ls_mov>-mjahr }{ gc_tab }{ <ls_mov>-mblnr }{ gc_tab }| &&
@@ -1135,8 +1337,10 @@ FORM reorder_sheets_like_template.
   PERFORM append_ordered_sheet USING 'V438A'    CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'V_399D_E' CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MARA'     CHANGING lt_ordered.
-  PERFORM append_ordered_sheet USING 'MATDOC'   CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MARC'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MDMA'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MDLV'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MATDOC'   CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MBEW'     CHANGING lt_ordered.
 
   LOOP AT gt_sheets ASSIGNING FIELD-SYMBOL(<ls_sheet>).
@@ -1311,23 +1515,35 @@ FORM build_worksheet_xml USING it_lines TYPE tt_string
   DATA: lt_cells     TYPE STANDARD TABLE OF string,
         lv_row       TYPE i,
         lv_col       TYPE i,
+        lv_max_col   TYPE i,
         lv_col_name  TYPE string,
+        lv_last_col  TYPE string,
         lv_cell_ref  TYPE string,
         lv_cell_xml  TYPE string,
         lv_value     TYPE string,
-        lv_row_c     TYPE string.
+        lv_row_c     TYPE string,
+        lv_last_row_c TYPE string.
 
   cv_xml =
     |<?xml version="1.0" encoding="UTF-8" standalone="yes"?>| &&
     |<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">| &&
+    |<sheetViews><sheetView workbookViewId="0">| &&
+    |<pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/>| &&
+    |</sheetView></sheetViews>| &&
     |<sheetData>|.
 
   lv_row = 0.
+  lv_max_col = 0.
   LOOP AT it_lines ASSIGNING FIELD-SYMBOL(<lv_line>).
     lv_row = lv_row + 1.
     lv_row_c = lv_row.
     CONDENSE lv_row_c NO-GAPS.
     SPLIT <lv_line> AT gc_tab INTO TABLE lt_cells.
+    IF lv_row = 2.
+      lv_max_col = lines( lt_cells ).
+    ELSEIF lv_max_col = 0 OR lines( lt_cells ) > lv_max_col.
+      lv_max_col = lines( lt_cells ).
+    ENDIF.
     cv_xml = cv_xml && |<row r="{ lv_row_c }">|.
 
     lv_col = 0.
@@ -1344,7 +1560,15 @@ FORM build_worksheet_xml USING it_lines TYPE tt_string
     cv_xml = cv_xml && |</row>|.
   ENDLOOP.
 
-  cv_xml = cv_xml && |</sheetData></worksheet>|.
+  cv_xml = cv_xml && |</sheetData>|.
+  IF lv_max_col > 0.
+    PERFORM column_name USING lv_max_col CHANGING lv_last_col.
+    lv_last_row_c = COND string( WHEN lv_row > 2 THEN lv_row ELSE 2 ).
+    CONDENSE lv_last_row_c NO-GAPS.
+    cv_xml = cv_xml &&
+      |<autoFilter ref="A2:{ lv_last_col }{ lv_last_row_c }"/>|.
+  ENDIF.
+  cv_xml = cv_xml && |</worksheet>|.
 
 ENDFORM.
 
