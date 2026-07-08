@@ -1,102 +1,38 @@
 *&---------------------------------------------------------------------*
 *& Report  ZSTOXION_EXPORT
 *&---------------------------------------------------------------------*
-*& Zweck   : Template-konformer Datenexport fuer die stoxion
-*&           Safety-Stock-Optimierung (Pilot Ansmann AG).
-*&           Erzeugt eine oder mehrere XLSX-Arbeitsmappen mit je SAP-Tabelle
-*&           einem Reiter und zwei Kopfzeilen (Bezeichnung + technischer Feldname),
-*&           identisch zur Reiterstruktur des Excel-Templates
-*&           "Soll-Sicherheitsbestand_Template.xlsx".
+*& Zweck   : Template-konformer SAP-Datenexport fuer die stoxion
+*&           Safety-Stock-Optimierung.
+*&
+*& Ausgabe  : Eine oder mehrere XLSX-Arbeitsmappen mit einem Reiter je
+*&           fachlichem Datenbereich. Jeder Reiter enthaelt zwei Kopfzeilen:
+*&           Zeile 1 = fachliche Spaltenbezeichnung
+*&           Zeile 2 = technischer Feldname
+*&           ab Zeile 3 = Daten
 *&
 *& Reiter   : T001, T001W, T006, T134, V438A, V_399D_E,
 *&            MARA, MARC, MDMA, MDLV, MATDOC, MBEW
 *&
-*& Version 1.1 - Aenderungen fuer stoxion-App 1.1:
-*&   - Dispobereiche werden nicht mehr ausgeschlossen, sondern ueber
-*&     MARC-DIBER gekennzeichnet und per MDMA/MDLV exportiert
-*&   - MATDOC enthaelt LGORT zur Zuordnung von Bewegungen zu
-*&     Dispobereichen; Stornoreferenzen inkl. SMBLP bleiben vollstaendig
-*&   - Alle Worksheets frieren die ersten zwei Zeilen ein und setzen
-*&     AutoFilter von Zeile 2 bis zur letzten ausgegebenen Spalte
+*& Quellen  : Material- und Werksstammdaten aus MARA/MARC/MBEW,
+*&           Bewegungen aus MSEG/MKPF, Dispobereiche aus MDMA/MDLV
+*&           sowie die benoetigten Organisations- und Customizingtabellen.
 *&
-*& Version 2 - Aenderungen ggue. v1:
-*&   - Mehrere Werke je Lauf (S_WERKS), alle in einem Dateisatz
-*&   - Neue Filter: Material, Materialart, Warengruppe, Dispomerkmal,
-*&     ABC-Kennzeichen, Sonderbestandskennzeichen (nur Filter, keine
-*&     neuen Spalten -> Template bleibt unveraendert)
-*&   - Top-N entfernt (Auswahl erfolgt in stoxion)
-*&   - S/4-Weiche entfernt: immer MSEG+MKPF. Auf S/4HANA ist MSEG ein
-*&     Compatibility View auf MATDOC -> identische Daten, ein Codepfad
-*&   - Bewegungsdaten paketiert (Material-Chunks)
-*&   - Hintergrundjob-Button auf dem Selektionsbild (erzwingt
-*&     Server-Export), Batch-Schutz bei sy-batch
-*&   - AUTHORITY-CHECKs: M_MATE_WRK je Werk, S_DATASET vor OPEN DATASET
-*&   - MARM-Filter als DB-Join statt Doppel-Loop
+*& Dispobereiche:
+*&   - MARC-DIBER kennzeichnet, ob zu MATNR/WERKS MDMA-Eintraege
+*&     vorhanden sind.
+*&   - Ohne Dispobereich kommen DISMM/EISBE/PLIFZ/PSTAT aus MARC.
+*&   - Mit Dispobereich kommen DISMM/EISBE/PLIFZ/PSTAT aus MDMA.
+*&   - MDLV liefert die gueltigen BERID/WERKS/LGORT-Zuordnungen.
 *&
-*& Version 3 - Aenderungen ggue. v2:
-*&   - XLSX-Workbook-Ausgabe statt einzelner TXT-Dateien
-*&   - Bewegungsdaten auf gefilterte Material/Werk-Kombinationen begrenzt
-*&   - Zahlen/Datum explizit im Parser-Format ausgegeben
-*&   - Selektionsbildschirm deutsch/englisch beschriftet
+*& Format   : Keine Format-/Headerformatierung im Workbook. Alle Zellen
+*&           werden als Text geschrieben, damit IDs und fuehrende Nullen
+*&           unveraendert bleiben. Alle Reiter frieren die ersten zwei
+*&           Zeilen ein und setzen den AutoFilter von Zeile 2 bis zur
+*&           letzten ausgegebenen Spalte und Datenzeile.
 *&
-*& Version 4 - Aenderungen ggue. v3:
-*&   - Workbook-Reihenfolge und Kopfzeilen an MVP-Template main angeglichen
-*&   - Bewegungsarten default auf MVP-relevante Nachfragearten gesetzt
-*&   - Bewegungsdaten-Defaultzeitraum auf ca. 24 Monate begrenzt
-*&   - Abbruch vor XLSX-Erzeugung, wenn MATDOC das Excel-Zeilenlimit
-*&     ueberschreitet
-*&
-*& Version 5 - Aenderungen ggue. v4:
-*&   - MATDOC wird an Material/Werk-Grenzen auf mehrere Arbeitsmappen
-*&     verteilt, bevor ein Excel-Reiter das Zeilenlimit ueberschreitet
-*&   - Bei mehreren Arbeitsmappen wird automatisch ein ZIP geschrieben
-*&   - MARA/MARC/MBEW werden je Arbeitsmappe auf das jeweilige
-*&     Material/Werk-Paket eingeschraenkt
-*&
-*& Version 6 - Aenderungen ggue. v5:
-*&   - Dialog/Job-Konsistenz: Datums-/BWART-Defaults werden nur noch
-*&     im Dialog gesetzt (sy-batch-Guard). Bei SUBMIT ... VIA JOB
-*&     laeuft INITIALIZATION vor der Uebernahme der Selektionstabelle;
-*&     eine bewusst geleerte Selektion wuerde sonst im Job
-*&     stillschweigend re-defaulted.
-*&   - Max. Zeilen je Arbeitsmappe parametrisierbar (P_MAXROW,
-*&     Default 500.000, Obergrenze Excel-Limit) zur Begrenzung des
-*&     Speicherbedarfs je Arbeitsmappe
-*&   - Server-Export: ab der zweiten Arbeitsmappe wird jede Mappe
-*&     sofort als nummerierte Datei geschrieben (kein Sammel-ZIP im
-*&     Speicher). ZIP-Buendelung nur noch beim Frontend-Download.
-*&   - Fortschrittsmeldung je Arbeitsmappe im Job-Log (sy-batch)
-*&   - Pfadbehandlung robuster: gemischte Separatoren am Pfadende,
-*&     UNC-Pfade (\\server\share) werden fuer Server-Export abgewiesen
-*&   - Toter Code entfernt (FORM write_xlsx_workbook, TYPE-POOLS sabc)
-*&
-*& Release  : Min. NW 7.40 (Inline-Deklarationen).
-*&            Lauffaehig auf ECC 6.0 und S/4HANA.
-*&
-*& Hinweis  : Als lokales Objekt ($TMP) anlegbar -> KEIN Transport noetig.
-*&            Empfehlung fuer Voll-Export: Button "Hintergrundjob
-*&            einplanen" verwenden; Exportdatei danach aus AL11 abholen
-*&            (z.B. via CG3Y).
-*&            Datenschutz: Es werden KEINE personenbezogenen Daten
-*&            exportiert (kein Benutzername aus MKPF o.ae.).
-*&            Performance ECC 6.0: Vor dem Voll-Export pruefen, ob ein
-*&            Sekundaerindex auf MSEG (MATNR/WERKS, Standardindex
-*&            MSEG~M ab hoeheren EhPs) vorhanden ist, sonst koennen
-*&            die paketierten Bewegungs-Selects teuer werden. Auf
-*&            S/4HANA (MATDOC) unkritisch.
-*&
-*& Filter/Optionen (per Checkbox):
-*&   - Material/Werk-Kombinationen mit Dispobereich (MDMA) werden
-*&     in Version 1.1 exportiert und ueber MARC-DIBER gekennzeichnet
-*&   - Materialien mit alternativen Mengeneinheiten (MARM-Satz mit
-*&     MEINH <> Basis-ME) komplett entfernt
-*&
-*& Formatkontrakt (stoxion-Parser):
-*&   - XLSX-Arbeitsmappe(n), ein Reiter je Template-Reiter, 2 Kopfzeilen
-*&   - Freeze Panes unter Zeile 2, AutoFilter auf Zeile 2 bis Datenende
-*&   - Datum roh als JJJJMMTT, Mengen/Preise mit '.' als Dezimaltrenner,
-*&     MATNR mit fuehrenden Nullen
-*&   - Zellen als Text geschrieben, damit IDs unveraendert bleiben
+*& Betrieb  : Fuer groessere Exporte den Hintergrundjob verwenden und die
+*&           Datei danach vom Applikationsserver abholen. Es werden keine
+*&           personenbezogenen Daten exportiert.
 *&---------------------------------------------------------------------*
 REPORT zstoxion_export.
 
@@ -122,13 +58,13 @@ SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_t_mov.
   SELECT-OPTIONS: s_budat FOR mkpf-budat OBLIGATORY,  "Buchungsdatum
-                  s_bwart FOR mseg-bwart,              "Bewegungsart (MVP-Default)
+                  s_bwart FOR mseg-bwart,              "Bewegungsart
                   s_sobkz FOR mseg-sobkz.              "Sonderbestand (opt.)
 SELECTION-SCREEN END OF BLOCK b2.
 
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE gv_t_flt.
-  PARAMETERS: p_fmrp AS CHECKBOX DEFAULT 'X',          "1.1: Dispobereiche immer exportieren
-              p_fuom AS CHECKBOX DEFAULT 'X'.          "Filter alt. ME
+  PARAMETERS: p_fmrp AS CHECKBOX DEFAULT 'X',          "Alte Varianten bleiben lauffaehig
+              p_fuom AS CHECKBOX DEFAULT 'X'.          "Alternative Mengeneinheiten ausschliessen
 SELECTION-SCREEN END OF BLOCK b3.
 
 SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_t_tgt.
@@ -287,7 +223,7 @@ INITIALIZATION.
       %_s_budat_%_app_%-text = 'Buchungsdatum'.
       %_s_bwart_%_app_%-text = 'Bewegungsart'.
       %_s_sobkz_%_app_%-text = 'Sonderbestand'.
-      %_p_fmrp_%_app_%-text = 'Dispobereiche immer exportieren (1.1)'.
+      %_p_fmrp_%_app_%-text = 'Dispobereiche exportieren'.
       %_p_fuom_%_app_%-text = 'Alternative ME ausschliessen'.
       %_p_front_%_app_%-text = 'Frontend-Download'.
       %_p_serv_%_app_%-text = 'Applikationsserver'.
@@ -311,7 +247,7 @@ INITIALIZATION.
       %_s_budat_%_app_%-text = 'Posting date'.
       %_s_bwart_%_app_%-text = 'Movement type'.
       %_s_sobkz_%_app_%-text = 'Special stock'.
-      %_p_fmrp_%_app_%-text = 'Always export MRP areas (1.1)'.
+      %_p_fmrp_%_app_%-text = 'Export MRP areas'.
       %_p_fuom_%_app_%-text = 'Exclude alternative UoM'.
       %_p_front_%_app_%-text = 'Frontend download'.
       %_p_serv_%_app_%-text = 'Application server'.
@@ -353,7 +289,7 @@ INITIALIZATION.
       INTO s_budat-low.
     APPEND s_budat.
 
-    " MVP verarbeitet Nachfragebewegungen aus diesen BWARTs.
+    " Default fuer typische Nachfrage- und Umlagerungsbewegungen.
     s_bwart-sign   = 'I'.
     s_bwart-option = 'EQ'.
     s_bwart-low    = '201'. APPEND s_bwart.
@@ -420,7 +356,7 @@ START-OF-SELECTION.
   ENDLOOP.
   SORT gt_plants BY werks.
 
-* --- 1) Kandidaten: MARC + MARA mit allen Filtern in einem Join -------
+* --- 1) Kandidaten: MARC + MARA mit Stammdatenfiltern -----------------
   SELECT c~matnr, c~werks, c~lvorm, c~dismm, c~eisbe, c~plifz,
          c~webaz, c~pstat, c~maabc, c~wzeit,
          a~mtart, a~meins
@@ -447,7 +383,7 @@ START-OF-SELECTION.
     ENDIF.
   ENDLOOP.
 
-* --- 2) Dispobereiche (MDMA, je Material/Werk) fuer App 1.1 -----------
+* --- 2) Dispobereiche (MDMA, je Material/Werk) kennzeichnen -----------
   DATA lt_mdma TYPE tt_mdma.
   SELECT matnr, berid, werks, dismm, eisbe, plifz, pstat
     FROM mdma
@@ -494,7 +430,7 @@ START-OF-SELECTION.
     ENDIF.
   ENDIF.
 
-* --- 3) Hard-Filter: alternative Mengeneinheiten (DB-Join) ------------
+* --- 3) Materialien mit alternativen Mengeneinheiten ausschliessen ----
   IF p_fuom = 'X'.
     DATA lt_altuom TYPE SORTED TABLE OF mara-matnr
                          WITH UNIQUE KEY table_line.
@@ -555,7 +491,7 @@ START-OF-SELECTION.
   PERFORM load_mdlv CHANGING lt_mdlv.
 
 *----------------------------------------------------------------------*
-* 6) Ausgabe je Reiter erzeugen
+* 6) Arbeitsmappen erzeugen
 *----------------------------------------------------------------------*
 * --- MATDOC: Bewegungsdaten paketiert, Aufteilung am Zeilenlimit -------
 * Bewusst inkl. Stornoreferenzen (SJAHR/SMBLN/SMBLP): die Storno-
@@ -1324,7 +1260,7 @@ FORM write_sheet USING iv_name  TYPE string
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM reorder_sheets_like_template - Reiterfolge wie MVP-Template
+*& FORM reorder_sheets_like_template - feste Reiterfolge fuer stoxion
 *&---------------------------------------------------------------------*
 FORM reorder_sheets_like_template.
 
