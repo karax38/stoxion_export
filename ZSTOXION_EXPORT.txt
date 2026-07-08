@@ -137,7 +137,7 @@ TYPES: BEGIN OF ty_plant,
        END OF ty_mdma,
        BEGIN OF ty_mdlv,
          berid TYPE c LENGTH 10,
-         berty TYPE c LENGTH 1,
+         berty TYPE string,
          bertx TYPE c LENGTH 40,
          werks TYPE werks_d,
          lgort TYPE lgort_d,
@@ -715,6 +715,7 @@ FORM load_mdlv CHANGING ct_mdlv TYPE tt_mdlv.
     ASSIGN COMPONENT 'BERTY' OF STRUCTURE <ls_raw> TO <lv_any>.
     IF sy-subrc = 0.
       ls_mdlv-berty = <lv_any>.
+      SHIFT ls_mdlv-berty LEFT DELETING LEADING '0'.
     ENDIF.
     ASSIGN COMPONENT 'BERTX' OF STRUCTURE <ls_raw> TO <lv_any>.
     IF sy-subrc = 0.
