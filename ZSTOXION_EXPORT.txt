@@ -11,7 +11,7 @@
 *&           ab Zeile 3 = Daten
 *&
 *& Reiter   : T001, T001W, T006, T134, V438A, V_399D_E,
-*&            MARA, MARC, MDMA, MDLV, MATDOC, MBEW
+*&            MARA, MATDOC, MARC, MBEW, MDMA, MDLV
 *&
 *& Quellen  : Material- und Werksstammdaten aus MARA/MARC/MBEW,
 *&           Bewegungen aus MSEG/MKPF, Dispobereiche aus MDMA/MDLV
@@ -21,7 +21,7 @@
 *&   - MARC-DIBER kennzeichnet, ob zu MATNR/WERKS MDMA-Eintraege
 *&     vorhanden sind.
 *&   - Ohne Dispobereich kommen DISMM/EISBE/PLIFZ/PSTAT aus MARC.
-*&   - Mit Dispobereich kommen DISMM/EISBE/PLIFZ/PSTAT aus MDMA.
+*&   - Mit Dispobereich kommen DISMM/EISBE/PLIFZ/PSTAT/LOEKZ aus MDMA.
 *&   - MDLV liefert die gueltigen BERID/WERKS/LGORT-Zuordnungen.
 *&
 *& Format   : Keine Format-/Headerformatierung im Workbook. Alle Zellen
@@ -133,6 +133,7 @@ TYPES: BEGIN OF ty_plant,
          eisbe TYPE mdma-eisbe,
          plifz TYPE mdma-plifz,
          pstat TYPE mdma-pstat,
+         loekz TYPE mdma-loekz,
        END OF ty_mdma,
        BEGIN OF ty_mdlv,
          berid TYPE c LENGTH 10,
@@ -385,7 +386,7 @@ START-OF-SELECTION.
 
 * --- 2) Dispobereiche (MDMA, je Material/Werk) kennzeichnen -----------
   DATA lt_mdma TYPE tt_mdma.
-  SELECT matnr, berid, werks, dismm, eisbe, plifz, pstat
+  SELECT matnr, berid, werks, dismm, eisbe, plifz, pstat, loekz
     FROM mdma
     INTO CORRESPONDING FIELDS OF TABLE @lt_mdma
     FOR ALL ENTRIES IN @gt_marc
@@ -972,14 +973,16 @@ FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma
   CLEAR gt_lines.
   APPEND |Materialnummer{ gc_tab }Dispobereich{ gc_tab }Werk{ gc_tab }| &&
          |Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
-         |Planlieferzeit (Kalendertage){ gc_tab }Pflegestatus (D/E/L)| TO gt_lines.
+         |Planlieferzeit (Kalendertage){ gc_tab }Pflegestatus (D/E/L){ gc_tab }| &&
+         |Loeschvormerkung| TO gt_lines.
   APPEND |MATNR{ gc_tab }BERID{ gc_tab }WERKS{ gc_tab }DISMM{ gc_tab }| &&
-         |EISBE{ gc_tab }PLIFZ{ gc_tab }PSTAT| TO gt_lines.
+         |EISBE{ gc_tab }PLIFZ{ gc_tab }PSTAT{ gc_tab }LOEKZ| TO gt_lines.
   LOOP AT it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma>).
     APPEND |{ <ls_mdma>-matnr }{ gc_tab }{ <ls_mdma>-berid }{ gc_tab }| &&
            |{ <ls_mdma>-werks }{ gc_tab }{ <ls_mdma>-dismm }{ gc_tab }| &&
            |{ <ls_mdma>-eisbe NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mdma>-plifz NUMBER = RAW }{ gc_tab }{ <ls_mdma>-pstat }| TO gt_lines.
+           |{ <ls_mdma>-plifz NUMBER = RAW }{ gc_tab }{ <ls_mdma>-pstat }{ gc_tab }| &&
+           |{ <ls_mdma>-loekz }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MDMA' gt_lines.
 
@@ -1273,11 +1276,11 @@ FORM reorder_sheets_like_template.
   PERFORM append_ordered_sheet USING 'V438A'    CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'V_399D_E' CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MARA'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MATDOC'   CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MARC'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MBEW'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MDMA'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MDLV'     CHANGING lt_ordered.
-  PERFORM append_ordered_sheet USING 'MATDOC'   CHANGING lt_ordered.
-  PERFORM append_ordered_sheet USING 'MBEW'     CHANGING lt_ordered.
 
   LOOP AT gt_sheets ASSIGNING FIELD-SYMBOL(<ls_sheet>).
     READ TABLE lt_ordered TRANSPORTING NO FIELDS
