@@ -721,7 +721,10 @@ FORM load_mdlv CHANGING ct_mdlv TYPE tt_mdlv.
     IF sy-subrc = 0.
       ls_mdlv-bertx = <lv_any>.
     ENDIF.
-    ASSIGN COMPONENT 'LGORT' OF STRUCTURE <ls_raw> TO <lv_any>.
+    ASSIGN COMPONENT 'ORTZG' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc <> 0.
+      ASSIGN COMPONENT 'LGORT' OF STRUCTURE <ls_raw> TO <lv_any>.
+    ENDIF.
     IF sy-subrc = 0.
       ls_mdlv-lgort = <lv_any>.
     ENDIF.
