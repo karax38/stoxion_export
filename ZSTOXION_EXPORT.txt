@@ -68,8 +68,7 @@ SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_t_mov.
 SELECTION-SCREEN END OF BLOCK b2.
 
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE gv_t_flt.
-  PARAMETERS: p_fmrp AS CHECKBOX DEFAULT 'X',          "Alte Varianten bleiben lauffaehig
-              p_fuom AS CHECKBOX DEFAULT 'X'.          "Alternative Mengeneinheiten ausschliessen
+  PARAMETERS: p_fuom AS CHECKBOX DEFAULT 'X'.          "Alternative Mengeneinheiten ausschliessen
 SELECTION-SCREEN END OF BLOCK b3.
 
 SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_t_tgt.
@@ -240,7 +239,6 @@ INITIALIZATION.
       %_s_budat_%_app_%-text = 'Buchungsdatum'.
       %_s_bwart_%_app_%-text = 'Bewegungsart'.
       %_s_sobkz_%_app_%-text = 'Sonderbestand'.
-      %_p_fmrp_%_app_%-text = 'Dispobereiche exportieren'.
       %_p_fuom_%_app_%-text = 'Alternative ME ausschliessen'.
       %_p_front_%_app_%-text = 'Frontend-Download'.
       %_p_serv_%_app_%-text = 'Applikationsserver'.
@@ -264,7 +262,6 @@ INITIALIZATION.
       %_s_budat_%_app_%-text = 'Posting date'.
       %_s_bwart_%_app_%-text = 'Movement type'.
       %_s_sobkz_%_app_%-text = 'Special stock'.
-      %_p_fmrp_%_app_%-text = 'Export MRP areas'.
       %_p_fuom_%_app_%-text = 'Exclude alternative UoM'.
       %_p_front_%_app_%-text = 'Frontend download'.
       %_p_serv_%_app_%-text = 'Application server'.
