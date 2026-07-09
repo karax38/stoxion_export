@@ -20,8 +20,11 @@
 *& Dispobereiche:
 *&   - MARC-DIBER kennzeichnet, ob zu MATNR/WERKS MDMA-Eintraege
 *&     vorhanden sind.
-*&   - Ohne Dispobereich kommen DISMM/EISBE/PLIFZ/PSTAT aus MARC.
-*&   - Mit Dispobereich kommen DISMM/EISBE/PLIFZ/PSTAT/LOEKZ aus MDMA.
+*&   - Der Werksdispobereich wird IMMER ueber MARC geplant
+*&     (DISMM/EISBE/PLIFZ/PSTAT aus MARC), auch bei DIBER=X.
+*&   - MDMA liefert zusaetzlich die untergeordneten Dispobereiche
+*&     (BERTY=2 Lagerort, BERTY=3 Lohnbearbeiter) mit eigenen
+*&     Planungsdaten inkl. LOEKZ.
 *&   - MDLV liefert die gueltigen BERID/WERKS/LGORT-Zuordnungen.
 *&
 *& Format   : Keine Format-/Headerformatierung im Workbook. Alle Zellen
@@ -191,6 +194,7 @@ TYPES: BEGIN OF ty_plant,
        tt_t134  TYPE STANDARD TABLE OF ty_t134  WITH DEFAULT KEY,
        tt_t438a TYPE STANDARD TABLE OF ty_t438a WITH DEFAULT KEY,
        tt_t399d TYPE STANDARD TABLE OF ty_t399d WITH DEFAULT KEY,
+       tt_dismm_range TYPE RANGE OF marc-dismm,
        tt_string TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
        BEGIN OF ty_sheet,
          name  TYPE string,
@@ -407,18 +411,11 @@ START-OF-SELECTION.
     LOOP AT gt_marc ASSIGNING <ls_marc>.
       DATA(lv_keep_mrp) = abap_false.
 
-      IF <ls_marc>-diber = 'X'.
-        LOOP AT lt_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma_filter>)
-             WHERE matnr = <ls_marc>-matnr
-               AND werks = <ls_marc>-werks.
-          IF <ls_mdma_filter>-dismm IN s_dismm.
-            lv_keep_mrp = abap_true.
-            EXIT.
-          ENDIF.
-        ENDLOOP.
-      ELSEIF <ls_marc>-dismm IN s_dismm.
-        lv_keep_mrp = abap_true.
-      ENDIF.
+      PERFORM keep_by_dismm_filter
+        USING <ls_marc>
+              lt_mdma
+              s_dismm[]
+        CHANGING lv_keep_mrp.
 
       IF lv_keep_mrp = abap_false.
         CLEAR <ls_marc>-matnr.          "markieren zum Loeschen
@@ -658,6 +655,32 @@ START-OF-SELECTION.
           |{ lines( gt_marc ) } Material/Werk-Kombinationen, | &&
           |{ lv_total } Bewegungen, | &&
           |{ gv_workbook_count } Arbeitsmappe(n).| TYPE 'S'.
+
+*&---------------------------------------------------------------------*
+*& FORM keep_by_dismm_filter - Material per Dispomerkmal behalten
+*&---------------------------------------------------------------------*
+FORM keep_by_dismm_filter USING is_marc  TYPE ty_marc
+                                it_mdma  TYPE tt_mdma
+                                it_dismm TYPE tt_dismm_range
+                          CHANGING cv_keep TYPE abap_bool.
+
+  cv_keep = abap_false.
+
+  " Der Werksdispobereich wird immer ueber MARC geplant.
+  IF is_marc-dismm IN it_dismm.
+    cv_keep = abap_true.
+  ELSEIF is_marc-diber = 'X'.
+    LOOP AT it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma_filter>)
+         WHERE matnr = is_marc-matnr
+           AND werks = is_marc-werks.
+      IF <ls_mdma_filter>-dismm IN it_dismm.
+        cv_keep = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+
+ENDFORM.
 
 *&---------------------------------------------------------------------*
 *& FORM calc_demand_history_window - Nachfragefenster berechnen
@@ -1871,6 +1894,117 @@ CLASS ltcl_demand_history DEFINITION FINAL FOR TESTING
     METHODS no_third_year_keeps_24 FOR TESTING.
     METHODS current_month_is_excluded FOR TESTING.
     METHODS raw_values_not_averaged FOR TESTING.
+ENDCLASS.
+
+CLASS ltcl_dismm_filter DEFINITION FINAL FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+  PRIVATE SECTION.
+    METHODS marc_match_keeps_diber_material FOR TESTING.
+    METHODS mdma_match_keeps_diber_material FOR TESTING.
+    METHODS no_match_rejects_diber_material FOR TESTING.
+    METHODS marc_only_material_uses_marc FOR TESTING.
+
+    METHODS assert_filter_result
+      IMPORTING is_marc     TYPE ty_marc
+                it_mdma     TYPE tt_mdma
+                iv_expected TYPE abap_bool.
+ENDCLASS.
+
+CLASS ltcl_dismm_filter IMPLEMENTATION.
+
+  METHOD assert_filter_result.
+    DATA lt_dismm TYPE tt_dismm_range.
+    DATA lv_keep  TYPE abap_bool.
+
+    APPEND VALUE #( sign = 'I'
+                    option = 'EQ'
+                    low = 'PD' ) TO lt_dismm.
+
+    PERFORM keep_by_dismm_filter
+      USING is_marc
+            it_mdma
+            lt_dismm
+      CHANGING lv_keep.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = iv_expected
+      act = lv_keep ).
+  ENDMETHOD.
+
+  METHOD marc_match_keeps_diber_material.
+    DATA lt_mdma TYPE tt_mdma.
+
+    APPEND VALUE ty_mdma( matnr = 'MAT-MARC'
+                          werks = '1000'
+                          berid = 'LG0001'
+                          dismm = 'ND' ) TO lt_mdma.
+
+    assert_filter_result(
+      is_marc = VALUE ty_marc( matnr = 'MAT-MARC'
+                               werks = '1000'
+                               diber = 'X'
+                               dismm = 'PD' )
+      it_mdma = lt_mdma
+      iv_expected = abap_true ).
+  ENDMETHOD.
+
+  METHOD mdma_match_keeps_diber_material.
+    DATA lt_mdma TYPE tt_mdma.
+
+    APPEND VALUE ty_mdma( matnr = 'MAT-MDMA'
+                          werks = '1000'
+                          berid = 'LG0001'
+                          dismm = 'ND' ) TO lt_mdma.
+    APPEND VALUE ty_mdma( matnr = 'MAT-MDMA'
+                          werks = '1000'
+                          berid = 'LG0002'
+                          dismm = 'PD' ) TO lt_mdma.
+
+    assert_filter_result(
+      is_marc = VALUE ty_marc( matnr = 'MAT-MDMA'
+                               werks = '1000'
+                               diber = 'X'
+                               dismm = 'ND' )
+      it_mdma = lt_mdma
+      iv_expected = abap_true ).
+  ENDMETHOD.
+
+  METHOD no_match_rejects_diber_material.
+    DATA lt_mdma TYPE tt_mdma.
+
+    APPEND VALUE ty_mdma( matnr = 'MAT-NONE'
+                          werks = '1000'
+                          berid = 'LG0001'
+                          dismm = 'ND' ) TO lt_mdma.
+
+    assert_filter_result(
+      is_marc = VALUE ty_marc( matnr = 'MAT-NONE'
+                               werks = '1000'
+                               diber = 'X'
+                               dismm = 'ND' )
+      it_mdma = lt_mdma
+      iv_expected = abap_false ).
+  ENDMETHOD.
+
+  METHOD marc_only_material_uses_marc.
+    DATA lt_mdma TYPE tt_mdma.
+
+    assert_filter_result(
+      is_marc = VALUE ty_marc( matnr = 'MAT-PLANT'
+                               werks = '1000'
+                               dismm = 'PD' )
+      it_mdma = lt_mdma
+      iv_expected = abap_true ).
+
+    assert_filter_result(
+      is_marc = VALUE ty_marc( matnr = 'MAT-PLANT'
+                               werks = '1000'
+                               dismm = 'ND' )
+      it_mdma = lt_mdma
+      iv_expected = abap_false ).
+  ENDMETHOD.
+
 ENDCLASS.
 
 CLASS ltcl_demand_history IMPLEMENTATION.
