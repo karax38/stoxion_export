@@ -278,7 +278,7 @@ INITIALIZATION.
           lv_init_start_max       TYPE sy-datum,
           lv_init_start_fallback  TYPE sy-datum.
 
-    PERFORM calculate_demand_history_window
+    PERFORM calc_demand_history_window
       CHANGING lv_init_window_end
                lv_init_start_max
                lv_init_start_fallback.
@@ -513,7 +513,7 @@ START-OF-SELECTION.
         lv_book_mov_rows TYPE i,
         lv_max_data_rows TYPE i.
 
-  PERFORM calculate_demand_history_window
+  PERFORM calc_demand_history_window
     CHANGING lv_history_window_end
              lv_history_start_max
              lv_history_start_fallback.
@@ -657,9 +657,9 @@ START-OF-SELECTION.
           |{ gv_workbook_count } Arbeitsmappe(n).| TYPE 'S'.
 
 *&---------------------------------------------------------------------*
-*& FORM calculate_demand_history_window - Nachfragefenster berechnen
+*& FORM calc_demand_history_window - Nachfragefenster berechnen
 *&---------------------------------------------------------------------*
-FORM calculate_demand_history_window
+FORM calc_demand_history_window
   CHANGING cv_window_end      TYPE sy-datum
            cv_start_max       TYPE sy-datum
            cv_start_fallback  TYPE sy-datum.
@@ -1864,15 +1864,15 @@ CLASS ltcl_demand_history DEFINITION FINAL FOR TESTING
                c_start_max      TYPE sy-datum VALUE '20230701',
                c_start_fallback TYPE sy-datum VALUE '20240701'.
 
-    METHODS third_year_booking_extends_window FOR TESTING.
-    METHODS no_third_year_booking_keeps_raw_24 FOR TESTING.
+    METHODS third_year_extends_window FOR TESTING.
+    METHODS no_third_year_keeps_24 FOR TESTING.
     METHODS current_month_is_excluded FOR TESTING.
-    METHODS raw_week_values_are_not_averaged FOR TESTING.
+    METHODS raw_values_not_averaged FOR TESTING.
 ENDCLASS.
 
 CLASS ltcl_demand_history IMPLEMENTATION.
 
-  METHOD third_year_booking_extends_window.
+  METHOD third_year_extends_window.
     DATA: lt_mov  TYPE tt_mov,
           lt_marc TYPE tt_marc,
           lt_mdma TYPE tt_mdma,
@@ -1923,7 +1923,7 @@ CLASS ltcl_demand_history IMPLEMENTATION.
       msg = 'Die Drittjahresbuchung bleibt im Rohdatenexport erhalten.' ).
   ENDMETHOD.
 
-  METHOD no_third_year_booking_keeps_raw_24.
+  METHOD no_third_year_keeps_24.
     DATA: lt_mov  TYPE tt_mov,
           lt_marc TYPE tt_marc,
           lt_mdma TYPE tt_mdma,
@@ -2000,7 +2000,7 @@ CLASS ltcl_demand_history IMPLEMENTATION.
       act = <ls_mov>-budat ).
   ENDMETHOD.
 
-  METHOD raw_week_values_are_not_averaged.
+  METHOD raw_values_not_averaged.
     DATA: lt_mov  TYPE tt_mov,
           lt_marc TYPE tt_marc,
           lt_mdma TYPE tt_mdma,
