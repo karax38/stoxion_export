@@ -40,7 +40,9 @@ TABLES: mara, marc, mseg, mkpf, sscrfields.
 
 CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
            gc_chunk          TYPE i VALUE 250,      "Material/Werk je Bewegungs-Paket
-           gc_excel_max_rows TYPE i VALUE 1048576.  "Excel-Zeilenlimit (Obergrenze P_MAXROW)
+           gc_excel_max_rows TYPE i VALUE 1048576,  "Excel-Zeilenlimit (Obergrenze P_MAXROW)
+           demand_history_months_max      TYPE i VALUE 36,
+           demand_history_months_fallback TYPE i VALUE 24.
 
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
@@ -135,14 +137,20 @@ TYPES: BEGIN OF ty_plant,
          pstat TYPE mdma-pstat,
          loekz TYPE mdma-loekz,
        END OF ty_mdma,
+       ty_berid TYPE c LENGTH 10,
        BEGIN OF ty_mdlv,
-         berid TYPE c LENGTH 10,
+         berid TYPE ty_berid,
          berty TYPE string,
          bertx TYPE c LENGTH 40,
          werks TYPE werks_d,
          lgort TYPE lgort_d,
          configdeprecationcode TYPE string,
        END OF ty_mdlv,
+       BEGIN OF ty_demand_key,
+         matnr TYPE matnr,
+         werks TYPE werks_d,
+         berid TYPE ty_berid,
+       END OF ty_demand_key,
        BEGIN OF ty_mbew,
          matnr TYPE mbew-matnr,
          bwkey TYPE mbew-bwkey,
@@ -174,6 +182,10 @@ TYPES: BEGIN OF ty_plant,
        tt_mov   TYPE STANDARD TABLE OF ty_mov   WITH DEFAULT KEY,
        tt_mdma  TYPE STANDARD TABLE OF ty_mdma  WITH DEFAULT KEY,
        tt_mdlv  TYPE STANDARD TABLE OF ty_mdlv  WITH DEFAULT KEY,
+       tt_mdlv_by_lgort TYPE SORTED TABLE OF ty_mdlv
+                         WITH NON-UNIQUE KEY werks lgort,
+       tt_demand_key TYPE SORTED TABLE OF ty_demand_key
+                     WITH UNIQUE KEY matnr werks berid,
        tt_mbew  TYPE STANDARD TABLE OF ty_mbew  WITH DEFAULT KEY,
        tt_t006  TYPE STANDARD TABLE OF ty_t006  WITH DEFAULT KEY,
        tt_t134  TYPE STANDARD TABLE OF ty_t134  WITH DEFAULT KEY,
@@ -262,33 +274,18 @@ INITIALIZATION.
   " keine Zeilen. Eine im Dialog bewusst geleerte Selektion (z.B.
   " "alle Bewegungsarten") wuerde im Job sonst still re-defaulted.
   IF sy-batch IS INITIAL.
-    DATA: lv_first_curr_month TYPE sy-datum,
-          lv_start_year       TYPE i,
-          lv_start_month      TYPE i,
-          lv_start_year_txt   TYPE c LENGTH 4,
-          lv_start_month_txt  TYPE n LENGTH 2.
+    DATA: lv_history_window_end      TYPE sy-datum,
+          lv_history_start_max       TYPE sy-datum,
+          lv_history_start_fallback  TYPE sy-datum.
 
-    lv_first_curr_month = sy-datum.
-    lv_first_curr_month+6(2) = '01'.
+    PERFORM calculate_demand_history_window
+      CHANGING lv_history_window_end
+               lv_history_start_max
+               lv_history_start_fallback.
 
-    s_budat-sign   = 'I'.
-    s_budat-option = 'BT'.
-    s_budat-high   = lv_first_curr_month - 1.
-
-    lv_start_year  = s_budat-high(4).
-    lv_start_month = s_budat-high+4(2).
-    DO 23 TIMES.
-      lv_start_month = lv_start_month - 1.
-      IF lv_start_month = 0.
-        lv_start_month = 12.
-        lv_start_year = lv_start_year - 1.
-      ENDIF.
-    ENDDO.
-    lv_start_year_txt = lv_start_year.
-    lv_start_month_txt = lv_start_month.
-    CONCATENATE lv_start_year_txt lv_start_month_txt '01'
-      INTO s_budat-low.
-    APPEND s_budat.
+    PERFORM set_demand_history_budat
+      USING lv_history_start_max
+            lv_history_window_end.
 
     " Default fuer typische Nachfrage- und Umlagerungsbewegungen.
     s_bwart-sign   = 'I'.
@@ -504,6 +501,9 @@ START-OF-SELECTION.
         lt_key_mov       TYPE tt_mov,
         lt_book_marc     TYPE tt_marc,
         lt_book_mov      TYPE tt_mov,
+        lv_history_window_end      TYPE sy-datum,
+        lv_history_start_max       TYPE sy-datum,
+        lv_history_start_fallback  TYPE sy-datum,
         lv_total         TYPE i,
         lv_from          TYPE i,
         lv_to            TYPE i,
@@ -512,6 +512,14 @@ START-OF-SELECTION.
         lv_key_rows      TYPE i,
         lv_book_mov_rows TYPE i,
         lv_max_data_rows TYPE i.
+
+  PERFORM calculate_demand_history_window
+    CHANGING lv_history_window_end
+             lv_history_start_max
+             lv_history_start_fallback.
+  PERFORM set_demand_history_budat
+    USING lv_history_start_max
+          lv_history_window_end.
 
   lv_max_data_rows = p_maxrow - 2.               "2 Kopfzeilen je Reiter
   lv_from = 1.
@@ -543,9 +551,19 @@ START-OF-SELECTION.
         AND m~werks =  @lt_chunk-werks
         AND m~sobkz IN @s_sobkz
         AND m~bwart IN @s_bwart
-        AND k~budat IN @s_budat.
+        AND k~budat >= @lv_history_start_max
+        AND k~budat <  @lv_history_window_end.
 
     SORT lt_mov BY matnr werks budat mblnr zeile.
+
+    PERFORM filter_matdoc_history_window
+      USING lv_history_window_end
+            lv_history_start_max
+            lv_history_start_fallback
+            gt_marc
+            lt_mdma
+            lt_mdlv
+      CHANGING lt_mov.
 
     LOOP AT lt_chunk ASSIGNING FIELD-SYMBOL(<ls_key>).
       CLEAR lt_key_mov.
@@ -637,6 +655,206 @@ START-OF-SELECTION.
           |{ lines( gt_marc ) } Material/Werk-Kombinationen, | &&
           |{ lv_total } Bewegungen, | &&
           |{ gv_workbook_count } Arbeitsmappe(n).| TYPE 'S'.
+
+*&---------------------------------------------------------------------*
+*& FORM calculate_demand_history_window - Nachfragefenster berechnen
+*&---------------------------------------------------------------------*
+FORM calculate_demand_history_window
+  CHANGING cv_window_end      TYPE sy-datum
+           cv_start_max       TYPE sy-datum
+           cv_start_fallback  TYPE sy-datum.
+
+  cv_window_end = sy-datum.
+  cv_window_end+6(2) = '01'. "laufender Monat bleibt ausgeschlossen
+
+  PERFORM subtract_months_from_first_day
+    USING cv_window_end demand_history_months_max
+    CHANGING cv_start_max.
+
+  PERFORM subtract_months_from_first_day
+    USING cv_window_end demand_history_months_fallback
+    CHANGING cv_start_fallback.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM set_demand_history_budat - BUDAT-Selektion technisch setzen
+*&---------------------------------------------------------------------*
+FORM set_demand_history_budat USING iv_start_max  TYPE sy-datum
+                                    iv_window_end TYPE sy-datum.
+
+  CLEAR s_budat[].
+  s_budat-sign   = 'I'.
+  s_budat-option = 'BT'.
+  s_budat-low    = iv_start_max.
+  s_budat-high   = iv_window_end - 1.
+  APPEND s_budat.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM subtract_months_from_first_day - Monatsersten verschieben
+*&---------------------------------------------------------------------*
+FORM subtract_months_from_first_day USING iv_date   TYPE sy-datum
+                                          iv_months TYPE i
+                                    CHANGING cv_date TYPE sy-datum.
+
+  DATA: lv_year       TYPE i,
+        lv_month      TYPE i,
+        lv_year_txt   TYPE c LENGTH 4,
+        lv_month_txt  TYPE n LENGTH 2.
+
+  lv_year  = iv_date(4).
+  lv_month = iv_date+4(2).
+
+  DO iv_months TIMES.
+    lv_month = lv_month - 1.
+    IF lv_month = 0.
+      lv_month = 12.
+      lv_year = lv_year - 1.
+    ENDIF.
+  ENDDO.
+
+  lv_year_txt = lv_year.
+  lv_month_txt = lv_month.
+  CONCATENATE lv_year_txt lv_month_txt '01' INTO cv_date.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM filter_matdoc_history_window - effektives MATDOC-Fenster
+*&---------------------------------------------------------------------*
+*& MATDOC wird global fuer maximal 36 volle Monate geladen. Das dritte
+*& Jahr bleibt je MATNR/WERKS/BERID nur dann im Rohdatenexport, wenn nach
+*& der Dispobereichszuordnung dort mindestens eine relevante Buchung
+*& vorhanden ist. Es werden keine Kalenderwochen oder Nullwochen erzeugt.
+*&---------------------------------------------------------------------*
+FORM filter_matdoc_history_window USING iv_window_end      TYPE sy-datum
+                                        iv_start_max       TYPE sy-datum
+                                        iv_start_fallback  TYPE sy-datum
+                                        it_marc            TYPE tt_marc
+                                        it_mdma            TYPE tt_mdma
+                                        it_mdlv            TYPE tt_mdlv
+                                  CHANGING ct_mov          TYPE tt_mov.
+
+  DATA: lt_third_year_keys TYPE tt_demand_key,
+        lt_mdlv_by_lgort   TYPE tt_mdlv_by_lgort,
+        ls_key             TYPE ty_demand_key,
+        lv_berid           TYPE ty_berid,
+        lv_index           TYPE sy-tabix.
+
+  lt_mdlv_by_lgort = it_mdlv.
+
+  DELETE ct_mov WHERE budat < iv_start_max
+                   OR budat >= iv_window_end.
+
+  LOOP AT ct_mov ASSIGNING FIELD-SYMBOL(<ls_mov_third_year>)
+       WHERE budat < iv_start_fallback.
+    CLEAR lv_berid.
+    PERFORM determine_mov_berid
+      USING <ls_mov_third_year>
+            it_marc
+            it_mdma
+            lt_mdlv_by_lgort
+      CHANGING lv_berid.
+
+    ls_key-matnr = <ls_mov_third_year>-matnr.
+    ls_key-werks = <ls_mov_third_year>-werks.
+    ls_key-berid = lv_berid.
+    INSERT ls_key INTO TABLE lt_third_year_keys.
+  ENDLOOP.
+
+  LOOP AT ct_mov ASSIGNING FIELD-SYMBOL(<ls_mov_history>).
+    lv_index = sy-tabix.
+    IF <ls_mov_history>-budat >= iv_start_fallback.
+      CONTINUE.
+    ENDIF.
+
+    CLEAR lv_berid.
+    PERFORM determine_mov_berid
+      USING <ls_mov_history>
+            it_marc
+            it_mdma
+            lt_mdlv_by_lgort
+      CHANGING lv_berid.
+
+    READ TABLE lt_third_year_keys TRANSPORTING NO FIELDS
+      WITH TABLE KEY matnr = <ls_mov_history>-matnr
+                     werks = <ls_mov_history>-werks
+                     berid = lv_berid.
+    IF sy-subrc <> 0.
+      DELETE ct_mov INDEX lv_index.
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM determine_mov_berid - MATDOC-Buchung einem Dispobereich zuordnen
+*&---------------------------------------------------------------------*
+FORM determine_mov_berid USING is_mov            TYPE ty_mov
+                               it_marc           TYPE tt_marc
+                               it_mdma           TYPE tt_mdma
+                               it_mdlv_by_lgort  TYPE tt_mdlv_by_lgort
+                         CHANGING cv_berid       TYPE ty_berid.
+
+  DATA lv_candidate TYPE ty_berid.
+
+  CLEAR cv_berid.
+
+  READ TABLE it_marc ASSIGNING FIELD-SYMBOL(<ls_marc>)
+    WITH KEY matnr = is_mov-matnr
+             werks = is_mov-werks
+    BINARY SEARCH.
+  IF sy-subrc <> 0 OR <ls_marc>-diber <> 'X'.
+    RETURN.
+  ENDIF.
+
+  IF is_mov-lgort IS NOT INITIAL.
+    READ TABLE it_mdlv_by_lgort ASSIGNING FIELD-SYMBOL(<ls_mdlv_lgort>)
+      WITH TABLE KEY werks = is_mov-werks
+                     lgort = is_mov-lgort.
+    IF sy-subrc = 0.
+      lv_candidate = <ls_mdlv_lgort>-berid.
+      READ TABLE it_mdma TRANSPORTING NO FIELDS
+        WITH KEY matnr = is_mov-matnr
+                 werks = is_mov-werks
+                 berid = lv_candidate
+        BINARY SEARCH.
+      IF sy-subrc = 0.
+        cv_berid = lv_candidate.
+        RETURN.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  lv_candidate = is_mov-werks.
+  READ TABLE it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma_plant>)
+    WITH KEY matnr = is_mov-matnr
+             werks = is_mov-werks
+             berid = lv_candidate
+    BINARY SEARCH.
+  IF sy-subrc = 0.
+    cv_berid = <ls_mdma_plant>-berid.
+    RETURN.
+  ENDIF.
+
+  READ TABLE it_mdlv_by_lgort ASSIGNING FIELD-SYMBOL(<ls_mdlv_plant>)
+    WITH TABLE KEY werks = is_mov-werks
+                   lgort = space.
+  IF sy-subrc = 0.
+    lv_candidate = <ls_mdlv_plant>-berid.
+    READ TABLE it_mdma TRANSPORTING NO FIELDS
+      WITH KEY matnr = is_mov-matnr
+               werks = is_mov-werks
+               berid = lv_candidate
+      BINARY SEARCH.
+    IF sy-subrc = 0.
+      cv_berid = lv_candidate.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.
 
 *&---------------------------------------------------------------------*
 *& Ergebnis-Writer initialisieren
@@ -1637,3 +1855,194 @@ FORM schedule_job.
           |Ueberwachung in SM37, Dateien danach in AL11.| TYPE 'S'.
 
 ENDFORM.
+
+CLASS ltcl_demand_history DEFINITION FINAL FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+  PRIVATE SECTION.
+    CONSTANTS: c_window_end     TYPE sy-datum VALUE '20260701',
+               c_start_max      TYPE sy-datum VALUE '20230701',
+               c_start_fallback TYPE sy-datum VALUE '20240701'.
+
+    METHODS third_year_booking_extends_window FOR TESTING.
+    METHODS no_third_year_booking_keeps_raw_24 FOR TESTING.
+    METHODS current_month_is_excluded FOR TESTING.
+    METHODS raw_week_values_are_not_averaged FOR TESTING.
+ENDCLASS.
+
+CLASS ltcl_demand_history IMPLEMENTATION.
+
+  METHOD third_year_booking_extends_window.
+    DATA: lt_mov  TYPE tt_mov,
+          lt_marc TYPE tt_marc,
+          lt_mdma TYPE tt_mdma,
+          lt_mdlv TYPE tt_mdlv.
+
+    APPEND VALUE ty_marc( matnr = 'MAT-156'
+                          werks = '1000'
+                          diber = 'X' ) TO lt_marc.
+    APPEND VALUE ty_mdma( matnr = 'MAT-156'
+                          werks = '1000'
+                          berid = 'MRPAREA1' ) TO lt_mdma.
+    APPEND VALUE ty_mdlv( berid = 'MRPAREA1'
+                          werks = '1000'
+                          lgort = '0001' ) TO lt_mdlv.
+    APPEND VALUE ty_mov( matnr = 'MAT-156'
+                         werks = '1000'
+                         lgort = '0001'
+                         budat = '20230715'
+                         menge = '3' ) TO lt_mov.
+    APPEND VALUE ty_mov( matnr = 'MAT-156'
+                         werks = '1000'
+                         lgort = '0001'
+                         budat = '20260615'
+                         menge = '4' ) TO lt_mov.
+
+    SORT lt_marc BY matnr werks.
+    SORT lt_mdma BY matnr werks berid.
+    PERFORM filter_matdoc_history_window
+      USING c_window_end
+            c_start_max
+            c_start_fallback
+            lt_marc
+            lt_mdma
+            lt_mdlv
+      CHANGING lt_mov.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = 2
+      act = lines( lt_mov )
+      msg = 'Buchung im Monat 25-36 muss das 36-Monats-Fenster aktivieren.' ).
+    READ TABLE lt_mov ASSIGNING FIELD-SYMBOL(<ls_oldest>) INDEX 1.
+    cl_abap_unit_assert=>assert_equals(
+      exp = 0
+      act = sy-subrc ).
+    cl_abap_unit_assert=>assert_equals(
+      exp = '20230715'
+      act = <ls_oldest>-budat
+      msg = 'Die Drittjahresbuchung bleibt im Rohdatenexport erhalten.' ).
+  ENDMETHOD.
+
+  METHOD no_third_year_booking_keeps_raw_24.
+    DATA: lt_mov  TYPE tt_mov,
+          lt_marc TYPE tt_marc,
+          lt_mdma TYPE tt_mdma,
+          lt_mdlv TYPE tt_mdlv.
+
+    APPEND VALUE ty_marc( matnr = 'MAT-104'
+                          werks = '1000' ) TO lt_marc.
+    APPEND VALUE ty_mov( matnr = 'MAT-104'
+                         werks = '1000'
+                         budat = '20240701'
+                         menge = '5' ) TO lt_mov.
+    APPEND VALUE ty_mov( matnr = 'MAT-104'
+                         werks = '1000'
+                         budat = '20260630'
+                         menge = '6' ) TO lt_mov.
+
+    SORT lt_marc BY matnr werks.
+    SORT lt_mdma BY matnr werks berid.
+    PERFORM filter_matdoc_history_window
+      USING c_window_end
+            c_start_max
+            c_start_fallback
+            lt_marc
+            lt_mdma
+            lt_mdlv
+      CHANGING lt_mov.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = 2
+      act = lines( lt_mov )
+      msg = 'Ohne Drittjahresbuchung werden keine kuenstlichen Nullwochen ergaenzt.' ).
+    LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov>).
+      cl_abap_unit_assert=>assert_true(
+        act = xsdbool( <ls_mov>-budat >= c_start_fallback )
+        msg = 'Ohne Drittjahresbuchung bleibt die effektive Rohhistorie bei 24 Monaten.' ).
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD current_month_is_excluded.
+    DATA: lt_mov  TYPE tt_mov,
+          lt_marc TYPE tt_marc,
+          lt_mdma TYPE tt_mdma,
+          lt_mdlv TYPE tt_mdlv.
+
+    APPEND VALUE ty_marc( matnr = 'MAT-CUR'
+                          werks = '1000' ) TO lt_marc.
+    APPEND VALUE ty_mov( matnr = 'MAT-CUR'
+                         werks = '1000'
+                         budat = '20260630'
+                         menge = '1' ) TO lt_mov.
+    APPEND VALUE ty_mov( matnr = 'MAT-CUR'
+                         werks = '1000'
+                         budat = '20260701'
+                         menge = '9' ) TO lt_mov.
+
+    SORT lt_marc BY matnr werks.
+    SORT lt_mdma BY matnr werks berid.
+    PERFORM filter_matdoc_history_window
+      USING c_window_end
+            c_start_max
+            c_start_fallback
+            lt_marc
+            lt_mdma
+            lt_mdlv
+      CHANGING lt_mov.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = 1
+      act = lines( lt_mov )
+      msg = 'Der laufende Monat darf nicht im MATDOC-Fenster bleiben.' ).
+    READ TABLE lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov>) INDEX 1.
+    cl_abap_unit_assert=>assert_equals(
+      exp = '20260630'
+      act = <ls_mov>-budat ).
+  ENDMETHOD.
+
+  METHOD raw_week_values_are_not_averaged.
+    DATA: lt_mov  TYPE tt_mov,
+          lt_marc TYPE tt_marc,
+          lt_mdma TYPE tt_mdma,
+          lt_mdlv TYPE tt_mdlv,
+          lv_sum  TYPE menge_d,
+          lv_exp  TYPE menge_d.
+
+    APPEND VALUE ty_marc( matnr = 'MAT-MC'
+                          werks = '1000' ) TO lt_marc.
+    APPEND VALUE ty_mov( matnr = 'MAT-MC'
+                         werks = '1000'
+                         budat = '20250106'
+                         menge = '2' ) TO lt_mov.
+    APPEND VALUE ty_mov( matnr = 'MAT-MC'
+                         werks = '1000'
+                         budat = '20250108'
+                         menge = '8' ) TO lt_mov.
+
+    SORT lt_marc BY matnr werks.
+    SORT lt_mdma BY matnr werks berid.
+    PERFORM filter_matdoc_history_window
+      USING c_window_end
+            c_start_max
+            c_start_fallback
+            lt_marc
+            lt_mdma
+            lt_mdlv
+      CHANGING lt_mov.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = 2
+      act = lines( lt_mov )
+      msg = 'Monte-Carlo-Eingangsdaten bleiben echte Buchungen, keine Kalenderwochen-Mittelwerte.' ).
+
+    LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_week_mov>).
+      lv_sum = lv_sum + <ls_week_mov>-menge.
+    ENDLOOP.
+    lv_exp = '10'.
+    cl_abap_unit_assert=>assert_equals(
+      exp = lv_exp
+      act = lv_sum
+      msg = 'Rohmengen muessen unveraendert summierbar bleiben.' ).
+  ENDMETHOD.
+
+ENDCLASS.
