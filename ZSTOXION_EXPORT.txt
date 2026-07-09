@@ -293,7 +293,10 @@ INITIALIZATION.
     s_bwart-low    = '201'. APPEND s_bwart.
     s_bwart-low    = '261'. APPEND s_bwart.
     s_bwart-low    = '281'. APPEND s_bwart.
+    s_bwart-low    = '543'. APPEND s_bwart.
+    s_bwart-low    = '551'. APPEND s_bwart.
     s_bwart-low    = '601'. APPEND s_bwart.
+    s_bwart-low    = '633'. APPEND s_bwart.
     s_bwart-low    = '641'. APPEND s_bwart.
     s_bwart-low    = '643'. APPEND s_bwart.
     s_bwart-low    = '645'. APPEND s_bwart.
