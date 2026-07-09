@@ -1900,9 +1900,9 @@ CLASS ltcl_dismm_filter DEFINITION FINAL FOR TESTING
   DURATION SHORT
   RISK LEVEL HARMLESS.
   PRIVATE SECTION.
-    METHODS marc_match_keeps_diber_material FOR TESTING.
-    METHODS mdma_match_keeps_diber_material FOR TESTING.
-    METHODS no_match_rejects_diber_material FOR TESTING.
+    METHODS marc_match_keeps_diber_mat FOR TESTING.
+    METHODS mdma_match_keeps_diber_mat FOR TESTING.
+    METHODS no_match_rejects_diber_mat FOR TESTING.
     METHODS marc_only_material_uses_marc FOR TESTING.
 
     METHODS assert_filter_result
@@ -1932,7 +1932,7 @@ CLASS ltcl_dismm_filter IMPLEMENTATION.
       act = lv_keep ).
   ENDMETHOD.
 
-  METHOD marc_match_keeps_diber_material.
+  METHOD marc_match_keeps_diber_mat.
     DATA lt_mdma TYPE tt_mdma.
 
     APPEND VALUE ty_mdma( matnr = 'MAT-MARC'
@@ -1949,7 +1949,7 @@ CLASS ltcl_dismm_filter IMPLEMENTATION.
       iv_expected = abap_true ).
   ENDMETHOD.
 
-  METHOD mdma_match_keeps_diber_material.
+  METHOD mdma_match_keeps_diber_mat.
     DATA lt_mdma TYPE tt_mdma.
 
     APPEND VALUE ty_mdma( matnr = 'MAT-MDMA'
@@ -1970,7 +1970,7 @@ CLASS ltcl_dismm_filter IMPLEMENTATION.
       iv_expected = abap_true ).
   ENDMETHOD.
 
-  METHOD no_match_rejects_diber_material.
+  METHOD no_match_rejects_diber_mat.
     DATA lt_mdma TYPE tt_mdma.
 
     APPEND VALUE ty_mdma( matnr = 'MAT-NONE'
