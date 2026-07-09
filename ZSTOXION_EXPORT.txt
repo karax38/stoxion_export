@@ -274,18 +274,18 @@ INITIALIZATION.
   " keine Zeilen. Eine im Dialog bewusst geleerte Selektion (z.B.
   " "alle Bewegungsarten") wuerde im Job sonst still re-defaulted.
   IF sy-batch IS INITIAL.
-    DATA: lv_history_window_end      TYPE sy-datum,
-          lv_history_start_max       TYPE sy-datum,
-          lv_history_start_fallback  TYPE sy-datum.
+    DATA: lv_init_window_end      TYPE sy-datum,
+          lv_init_start_max       TYPE sy-datum,
+          lv_init_start_fallback  TYPE sy-datum.
 
     PERFORM calculate_demand_history_window
-      CHANGING lv_history_window_end
-               lv_history_start_max
-               lv_history_start_fallback.
+      CHANGING lv_init_window_end
+               lv_init_start_max
+               lv_init_start_fallback.
 
     PERFORM set_demand_history_budat
-      USING lv_history_start_max
-            lv_history_window_end.
+      USING lv_init_start_max
+            lv_init_window_end.
 
     " Default fuer typische Nachfrage- und Umlagerungsbewegungen.
     s_bwart-sign   = 'I'.
