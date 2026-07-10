@@ -162,11 +162,6 @@ TYPES: BEGIN OF ty_plant,
          lgort TYPE lgort_d,
          configdeprecationcode TYPE string,
        END OF ty_mdlv,
-       BEGIN OF ty_demand_key,
-         matnr TYPE matnr,
-         werks TYPE werks_d,
-         berid TYPE ty_berid,
-       END OF ty_demand_key,
        BEGIN OF ty_mbew,
          matnr TYPE mbew-matnr,
          bwkey TYPE mbew-bwkey,
@@ -196,12 +191,10 @@ TYPES: BEGIN OF ty_plant,
        tt_mara  TYPE STANDARD TABLE OF ty_mara  WITH DEFAULT KEY,
        tt_key   TYPE STANDARD TABLE OF ty_marc_key WITH DEFAULT KEY,
        tt_mov   TYPE STANDARD TABLE OF ty_mov   WITH DEFAULT KEY,
-       tt_mdma  TYPE STANDARD TABLE OF ty_mdma  WITH DEFAULT KEY,
+       tt_mdma  TYPE SORTED TABLE OF ty_mdma
+                WITH NON-UNIQUE KEY matnr werks berid,
+       tt_mdma_std TYPE STANDARD TABLE OF ty_mdma WITH DEFAULT KEY,
        tt_mdlv  TYPE STANDARD TABLE OF ty_mdlv  WITH DEFAULT KEY,
-       tt_mdlv_by_lgort TYPE SORTED TABLE OF ty_mdlv
-                         WITH NON-UNIQUE KEY werks lgort,
-       tt_demand_key TYPE SORTED TABLE OF ty_demand_key
-                     WITH UNIQUE KEY matnr werks berid,
        tt_mbew  TYPE STANDARD TABLE OF ty_mbew  WITH DEFAULT KEY,
        tt_t006  TYPE STANDARD TABLE OF ty_t006  WITH DEFAULT KEY,
        tt_t134  TYPE STANDARD TABLE OF ty_t134  WITH DEFAULT KEY,
@@ -420,12 +413,11 @@ START-OF-SELECTION.
     FOR ALL ENTRIES IN @gt_marc
     WHERE matnr = @gt_marc-matnr
       AND werks = @gt_marc-werks.
-  SORT lt_mdma BY matnr werks berid.
 
   LOOP AT gt_marc ASSIGNING <ls_marc>.
     READ TABLE lt_mdma TRANSPORTING NO FIELDS
       WITH KEY matnr = <ls_marc>-matnr
-               werks = <ls_marc>-werks BINARY SEARCH.
+               werks = <ls_marc>-werks.
     IF sy-subrc = 0.
       <ls_marc>-diber = 'X'.
     ENDIF.
@@ -524,7 +516,6 @@ START-OF-SELECTION.
 
   DATA: lt_chunk         TYPE tt_key,
         lt_mov           TYPE tt_mov,
-        lt_key_mov       TYPE tt_mov,
         lt_book_marc     TYPE tt_marc,
         lt_book_mov      TYPE tt_mov,
         lv_history_window_end      TYPE sy-datum,
@@ -533,11 +524,24 @@ START-OF-SELECTION.
         lv_total         TYPE i,
         lv_from          TYPE i,
         lv_to            TYPE i,
-        lv_mov_idx       TYPE i,
-        lv_prev_idx      TYPE i,
         lv_key_rows      TYPE i,
+        lv_mov_first_idx TYPE i,
+        lv_mov_last_idx  TYPE i,
         lv_book_mov_rows TYPE i,
         lv_max_data_rows TYPE i.
+
+  TYPES: BEGIN OF ty_mov_index,
+           matnr     TYPE matnr,
+           werks     TYPE werks_d,
+           first_idx TYPE i,
+           row_count TYPE i,
+         END OF ty_mov_index,
+         tt_mov_index TYPE SORTED TABLE OF ty_mov_index
+                       WITH UNIQUE KEY matnr werks.
+
+  DATA: lt_mov_index  TYPE tt_mov_index,
+        ls_mov_index  TYPE ty_mov_index,
+        lv_index_open TYPE abap_bool.
 
   PERFORM calc_demand_history_window
     CHANGING lv_history_window_end
@@ -590,38 +594,41 @@ START-OF-SELECTION.
             lt_mdlv
       CHANGING lt_mov.
 
+    CLEAR: lt_mov_index, ls_mov_index, lv_index_open.
+    LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov_indexed>).
+      IF lv_index_open = abap_false OR
+         ls_mov_index-matnr <> <ls_mov_indexed>-matnr OR
+         ls_mov_index-werks <> <ls_mov_indexed>-werks.
+        IF lv_index_open = abap_true.
+          INSERT ls_mov_index INTO TABLE lt_mov_index.
+        ENDIF.
+
+        CLEAR ls_mov_index.
+        ls_mov_index-matnr = <ls_mov_indexed>-matnr.
+        ls_mov_index-werks = <ls_mov_indexed>-werks.
+        ls_mov_index-first_idx = sy-tabix.
+        ls_mov_index-row_count = 1.
+        lv_index_open = abap_true.
+      ELSE.
+        ls_mov_index-row_count = ls_mov_index-row_count + 1.
+      ENDIF.
+    ENDLOOP.
+    IF lv_index_open = abap_true.
+      INSERT ls_mov_index INTO TABLE lt_mov_index.
+    ENDIF.
+
     LOOP AT lt_chunk ASSIGNING FIELD-SYMBOL(<ls_key>).
-      CLEAR lt_key_mov.
-
-      READ TABLE lt_mov TRANSPORTING NO FIELDS
-        WITH KEY matnr = <ls_key>-matnr
-                 werks = <ls_key>-werks
-        BINARY SEARCH.
+      CLEAR: lv_key_rows, lv_mov_first_idx, lv_mov_last_idx.
+      READ TABLE lt_mov_index ASSIGNING FIELD-SYMBOL(<ls_mov_index>)
+        WITH TABLE KEY matnr = <ls_key>-matnr
+                       werks = <ls_key>-werks.
       IF sy-subrc = 0.
-        lv_mov_idx = sy-tabix.
-        WHILE lv_mov_idx > 1.
-          lv_prev_idx = lv_mov_idx - 1.
-          READ TABLE lt_mov ASSIGNING FIELD-SYMBOL(<ls_prev_mov>)
-            INDEX lv_prev_idx.
-          IF sy-subrc <> 0 OR
-             <ls_prev_mov>-matnr <> <ls_key>-matnr OR
-             <ls_prev_mov>-werks <> <ls_key>-werks.
-            EXIT.
-          ENDIF.
-          lv_mov_idx = lv_prev_idx.
-        ENDWHILE.
-
-        LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov>)
-             FROM lv_mov_idx.
-          IF <ls_mov>-matnr <> <ls_key>-matnr OR
-             <ls_mov>-werks <> <ls_key>-werks.
-            EXIT.
-          ENDIF.
-          APPEND <ls_mov> TO lt_key_mov.
-        ENDLOOP.
+        lv_key_rows = <ls_mov_index>-row_count.
+        lv_mov_first_idx = <ls_mov_index>-first_idx.
+        lv_mov_last_idx = <ls_mov_index>-first_idx
+                        + <ls_mov_index>-row_count - 1.
       ENDIF.
 
-      lv_key_rows = lines( lt_key_mov ).
       IF lv_key_rows > lv_max_data_rows.
         MESSAGE |Material/Werk { <ls_key>-matnr }/{ <ls_key>-werks } | &&
                 |ueberschreitet alleine das Zeilenlimit je Arbeitsmappe | &&
@@ -653,10 +660,15 @@ START-OF-SELECTION.
         APPEND <ls_marc> TO lt_book_marc.
       ENDIF.
 
-      APPEND LINES OF lt_key_mov TO lt_book_mov.
+      IF lv_key_rows > 0.
+        APPEND LINES OF lt_mov
+          FROM lv_mov_first_idx TO lv_mov_last_idx
+          TO lt_book_mov.
+      ENDIF.
       lv_book_mov_rows = lv_book_mov_rows + lv_key_rows.
       lv_total = lv_total + lv_key_rows.
     ENDLOOP.
+    CLEAR lt_mov_index.
   ENDWHILE.
 
   IF lt_book_marc IS NOT INITIAL.
@@ -672,7 +684,7 @@ START-OF-SELECTION.
                                     lt_mbew.
     CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
   ENDIF.
-  CLEAR: lt_chunk, lt_mov, lt_key_mov.
+  CLEAR: lt_chunk, lt_mov, lt_mov_index.
 
   PERFORM write_export_result.
 
@@ -818,10 +830,11 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 *& FORM filter_matdoc_history_window - effektives MATDOC-Fenster
 *&---------------------------------------------------------------------*
-*& MATDOC wird global fuer maximal 36 volle Monate geladen. Das dritte
-*& Jahr bleibt je MATNR/WERKS/BERID nur dann im Rohdatenexport, wenn nach
-*& der Dispobereichszuordnung dort mindestens eine relevante Buchung
-*& vorhanden ist. Es werden keine Kalenderwochen oder Nullwochen erzeugt.
+*& MATDOC wird fest auf maximal 36 volle Monate beschnitten; der laufende
+*& Monat bleibt ausgeschlossen. Die fruehere bedingte Drittjahreslogik
+*& entfaellt, weil eine Buchung im dritten Jahr ihre Relevanz selbst
+*& belegt. demand_history_months_fallback und iv_start_fallback bleiben
+*& aus Gruenden stabiler Signaturen deklariert.
 *&---------------------------------------------------------------------*
 FORM filter_matdoc_history_window USING iv_window_end      TYPE sy-datum
                                         iv_start_max       TYPE sy-datum
@@ -831,124 +844,11 @@ FORM filter_matdoc_history_window USING iv_window_end      TYPE sy-datum
                                         it_mdlv            TYPE tt_mdlv
                                   CHANGING ct_mov          TYPE tt_mov.
 
-  DATA: lt_third_year_keys TYPE tt_demand_key,
-        lt_mdlv_by_lgort   TYPE tt_mdlv_by_lgort,
-        lt_kept            TYPE tt_mov,
-        ls_key             TYPE ty_demand_key,
-        lv_berid           TYPE ty_berid.
-
-  lt_mdlv_by_lgort = it_mdlv.
+  " iv_start_fallback, it_marc, it_mdma und it_mdlv bleiben wegen
+  " Unit-Tests/Aufrufern in der Signatur stabil.
 
   DELETE ct_mov WHERE budat < iv_start_max
                    OR budat >= iv_window_end.
-
-  LOOP AT ct_mov ASSIGNING FIELD-SYMBOL(<ls_mov_third_year>)
-       WHERE budat < iv_start_fallback.
-    CLEAR lv_berid.
-    PERFORM determine_mov_berid
-      USING <ls_mov_third_year>
-            it_marc
-            it_mdma
-            lt_mdlv_by_lgort
-      CHANGING lv_berid.
-
-    ls_key-matnr = <ls_mov_third_year>-matnr.
-    ls_key-werks = <ls_mov_third_year>-werks.
-    ls_key-berid = lv_berid.
-    INSERT ls_key INTO TABLE lt_third_year_keys.
-  ENDLOOP.
-
-  LOOP AT ct_mov ASSIGNING FIELD-SYMBOL(<ls_mov_history>).
-    IF <ls_mov_history>-budat >= iv_start_fallback.
-      APPEND <ls_mov_history> TO lt_kept.
-      CONTINUE.
-    ENDIF.
-
-    CLEAR lv_berid.
-    PERFORM determine_mov_berid
-      USING <ls_mov_history>
-            it_marc
-            it_mdma
-            lt_mdlv_by_lgort
-      CHANGING lv_berid.
-
-    READ TABLE lt_third_year_keys TRANSPORTING NO FIELDS
-      WITH TABLE KEY matnr = <ls_mov_history>-matnr
-                     werks = <ls_mov_history>-werks
-                     berid = lv_berid.
-    IF sy-subrc = 0.
-      APPEND <ls_mov_history> TO lt_kept.
-    ENDIF.
-  ENDLOOP.
-
-  ct_mov = lt_kept.
-
-ENDFORM.
-
-*&---------------------------------------------------------------------*
-*& FORM determine_mov_berid - MATDOC-Buchung einem Dispobereich zuordnen
-*&---------------------------------------------------------------------*
-FORM determine_mov_berid USING is_mov            TYPE ty_mov
-                               it_marc           TYPE tt_marc
-                               it_mdma           TYPE tt_mdma
-                               it_mdlv_by_lgort  TYPE tt_mdlv_by_lgort
-                         CHANGING cv_berid       TYPE ty_berid.
-
-  DATA lv_candidate TYPE ty_berid.
-
-  CLEAR cv_berid.
-
-  READ TABLE it_marc ASSIGNING FIELD-SYMBOL(<ls_marc>)
-    WITH KEY matnr = is_mov-matnr
-             werks = is_mov-werks
-    BINARY SEARCH.
-  IF sy-subrc <> 0 OR <ls_marc>-diber <> 'X'.
-    RETURN.
-  ENDIF.
-
-  IF is_mov-lgort IS NOT INITIAL.
-    READ TABLE it_mdlv_by_lgort ASSIGNING FIELD-SYMBOL(<ls_mdlv_lgort>)
-      WITH TABLE KEY werks = is_mov-werks
-                     lgort = is_mov-lgort.
-    IF sy-subrc = 0.
-      lv_candidate = <ls_mdlv_lgort>-berid.
-      READ TABLE it_mdma TRANSPORTING NO FIELDS
-        WITH KEY matnr = is_mov-matnr
-                 werks = is_mov-werks
-                 berid = lv_candidate
-        BINARY SEARCH.
-      IF sy-subrc = 0.
-        cv_berid = lv_candidate.
-        RETURN.
-      ENDIF.
-    ENDIF.
-  ENDIF.
-
-  lv_candidate = is_mov-werks.
-  READ TABLE it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma_plant>)
-    WITH KEY matnr = is_mov-matnr
-             werks = is_mov-werks
-             berid = lv_candidate
-    BINARY SEARCH.
-  IF sy-subrc = 0.
-    cv_berid = <ls_mdma_plant>-berid.
-    RETURN.
-  ENDIF.
-
-  READ TABLE it_mdlv_by_lgort ASSIGNING FIELD-SYMBOL(<ls_mdlv_plant>)
-    WITH TABLE KEY werks = is_mov-werks
-                   lgort = space.
-  IF sy-subrc = 0.
-    lv_candidate = <ls_mdlv_plant>-berid.
-    READ TABLE it_mdma TRANSPORTING NO FIELDS
-      WITH KEY matnr = is_mov-matnr
-               werks = is_mov-werks
-               berid = lv_candidate
-      BINARY SEARCH.
-    IF sy-subrc = 0.
-      cv_berid = lv_candidate.
-    ENDIF.
-  ENDIF.
 
 ENDFORM.
 
@@ -1109,7 +1009,7 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
 
   DATA: lt_book_plants TYPE tt_plant,
         lt_book_mara   TYPE tt_mara,
-        lt_book_mdma   TYPE tt_mdma,
+        lt_book_mdma   TYPE tt_mdma_std,
         lt_book_mdlv   TYPE tt_mdlv,
         lt_book_mbew   TYPE tt_mbew,
         lv_xlsx        TYPE xstring.
@@ -1328,7 +1228,7 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 *& FORM build_mrp_area_sheets - MDMA/MDLV fuer Dispobereiche
 *&---------------------------------------------------------------------*
-FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma
+FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma_std
                                  it_mdlv TYPE tt_mdlv.
 
 * --- MDMA ---
@@ -1817,10 +1717,12 @@ FORM build_worksheet_xml USING it_lines TYPE tt_string
 
   DATA: lt_xml_parts  TYPE tt_string,
         lt_row_parts  TYPE tt_string,
+        lt_colnames   TYPE tt_string,
         lt_cells      TYPE STANDARD TABLE OF string,
         lv_row        TYPE i,
         lv_col        TYPE i,
         lv_max_col    TYPE i,
+        lv_next_col   TYPE i,
         lv_col_name   TYPE string,
         lv_last_col   TYPE string,
         lv_cell_ref   TYPE string,
@@ -1852,6 +1754,11 @@ FORM build_worksheet_xml USING it_lines TYPE tt_string
     ELSEIF lv_max_col = 0 OR lines( lt_cells ) > lv_max_col.
       lv_max_col = lines( lt_cells ).
     ENDIF.
+    WHILE lines( lt_colnames ) < lines( lt_cells ).
+      lv_next_col = lines( lt_colnames ) + 1.
+      PERFORM column_name USING lv_next_col CHANGING lv_col_name.
+      APPEND lv_col_name TO lt_colnames.
+    ENDWHILE.
 
     CLEAR lt_row_parts.
     APPEND |<row r="{ lv_row_c }">| TO lt_row_parts.
@@ -1859,7 +1766,7 @@ FORM build_worksheet_xml USING it_lines TYPE tt_string
     lv_col = 0.
     LOOP AT lt_cells ASSIGNING FIELD-SYMBOL(<lv_cell>).
       lv_col = lv_col + 1.
-      PERFORM column_name USING lv_col CHANGING lv_col_name.
+      READ TABLE lt_colnames INTO lv_col_name INDEX lv_col.
       lv_cell_ref = |{ lv_col_name }{ lv_row_c }|.
       PERFORM xml_escape USING <lv_cell> CHANGING lv_value.
       lv_cell_xml =
@@ -1903,6 +1810,15 @@ FORM column_name USING iv_col TYPE i CHANGING cv_name TYPE string.
 ENDFORM.
 
 FORM xml_escape USING iv_value TYPE string CHANGING cv_value TYPE string.
+
+  IF NOT ( iv_value CS '&' OR
+           iv_value CS '<' OR
+           iv_value CS '>' OR
+           iv_value CS '"' OR
+           iv_value CS '''' ).
+    cv_value = iv_value.
+    RETURN.
+  ENDIF.
 
   cv_value = iv_value.
   REPLACE ALL OCCURRENCES OF '&' IN cv_value WITH '&amp;'.
@@ -2061,10 +1977,10 @@ CLASS ltcl_dismm_filter IMPLEMENTATION.
   METHOD marc_match_keeps_diber_mat.
     DATA lt_mdma TYPE tt_mdma.
 
-    APPEND VALUE ty_mdma( matnr = 'MAT-MARC'
+    INSERT VALUE ty_mdma( matnr = 'MAT-MARC'
                           werks = '1000'
                           berid = 'LG0001'
-                          dismm = 'ND' ) TO lt_mdma.
+                          dismm = 'ND' ) INTO TABLE lt_mdma.
 
     assert_filter_result(
       is_marc = VALUE ty_marc( matnr = 'MAT-MARC'
@@ -2078,14 +1994,14 @@ CLASS ltcl_dismm_filter IMPLEMENTATION.
   METHOD mdma_match_keeps_diber_mat.
     DATA lt_mdma TYPE tt_mdma.
 
-    APPEND VALUE ty_mdma( matnr = 'MAT-MDMA'
+    INSERT VALUE ty_mdma( matnr = 'MAT-MDMA'
                           werks = '1000'
                           berid = 'LG0001'
-                          dismm = 'ND' ) TO lt_mdma.
-    APPEND VALUE ty_mdma( matnr = 'MAT-MDMA'
+                          dismm = 'ND' ) INTO TABLE lt_mdma.
+    INSERT VALUE ty_mdma( matnr = 'MAT-MDMA'
                           werks = '1000'
                           berid = 'LG0002'
-                          dismm = 'PD' ) TO lt_mdma.
+                          dismm = 'PD' ) INTO TABLE lt_mdma.
 
     assert_filter_result(
       is_marc = VALUE ty_marc( matnr = 'MAT-MDMA'
@@ -2099,10 +2015,10 @@ CLASS ltcl_dismm_filter IMPLEMENTATION.
   METHOD no_match_rejects_diber_mat.
     DATA lt_mdma TYPE tt_mdma.
 
-    APPEND VALUE ty_mdma( matnr = 'MAT-NONE'
+    INSERT VALUE ty_mdma( matnr = 'MAT-NONE'
                           werks = '1000'
                           berid = 'LG0001'
-                          dismm = 'ND' ) TO lt_mdma.
+                          dismm = 'ND' ) INTO TABLE lt_mdma.
 
     assert_filter_result(
       is_marc = VALUE ty_marc( matnr = 'MAT-NONE'
@@ -2144,9 +2060,9 @@ CLASS ltcl_demand_history IMPLEMENTATION.
     APPEND VALUE ty_marc( matnr = 'MAT-156'
                           werks = '1000'
                           diber = 'X' ) TO lt_marc.
-    APPEND VALUE ty_mdma( matnr = 'MAT-156'
+    INSERT VALUE ty_mdma( matnr = 'MAT-156'
                           werks = '1000'
-                          berid = 'MRPAREA1' ) TO lt_mdma.
+                          berid = 'MRPAREA1' ) INTO TABLE lt_mdma.
     APPEND VALUE ty_mdlv( berid = 'MRPAREA1'
                           werks = '1000'
                           lgort = '0001' ) TO lt_mdlv.
@@ -2162,7 +2078,6 @@ CLASS ltcl_demand_history IMPLEMENTATION.
                          menge = '4' ) TO lt_mov.
 
     SORT lt_marc BY matnr werks.
-    SORT lt_mdma BY matnr werks berid.
     PERFORM filter_matdoc_history_window
       USING c_window_end
             c_start_max
@@ -2204,7 +2119,6 @@ CLASS ltcl_demand_history IMPLEMENTATION.
                          menge = '6' ) TO lt_mov.
 
     SORT lt_marc BY matnr werks.
-    SORT lt_mdma BY matnr werks berid.
     PERFORM filter_matdoc_history_window
       USING c_window_end
             c_start_max
@@ -2243,7 +2157,6 @@ CLASS ltcl_demand_history IMPLEMENTATION.
                          menge = '9' ) TO lt_mov.
 
     SORT lt_marc BY matnr werks.
-    SORT lt_mdma BY matnr werks berid.
     PERFORM filter_matdoc_history_window
       USING c_window_end
             c_start_max
@@ -2283,7 +2196,6 @@ CLASS ltcl_demand_history IMPLEMENTATION.
                          menge = '8' ) TO lt_mov.
 
     SORT lt_marc BY matnr werks.
-    SORT lt_mdma BY matnr werks berid.
     PERFORM filter_matdoc_history_window
       USING c_window_end
             c_start_max
