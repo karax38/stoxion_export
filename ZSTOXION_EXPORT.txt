@@ -541,7 +541,8 @@ START-OF-SELECTION.
 
   DATA: lt_mov_index  TYPE tt_mov_index,
         ls_mov_index  TYPE ty_mov_index,
-        lv_index_open TYPE abap_bool.
+        lv_index_open TYPE abap_bool,
+        lv_mov_tabix  TYPE sy-tabix.
 
   PERFORM calc_demand_history_window
     CHANGING lv_history_window_end
@@ -596,6 +597,8 @@ START-OF-SELECTION.
 
     CLEAR: lt_mov_index, ls_mov_index, lv_index_open.
     LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov_indexed>).
+      " sy-tabix sofort sichern: INSERT in lt_mov_index ueberschreibt es
+      lv_mov_tabix = sy-tabix.
       IF lv_index_open = abap_false OR
          ls_mov_index-matnr <> <ls_mov_indexed>-matnr OR
          ls_mov_index-werks <> <ls_mov_indexed>-werks.
@@ -606,7 +609,7 @@ START-OF-SELECTION.
         CLEAR ls_mov_index.
         ls_mov_index-matnr = <ls_mov_indexed>-matnr.
         ls_mov_index-werks = <ls_mov_indexed>-werks.
-        ls_mov_index-first_idx = sy-tabix.
+        ls_mov_index-first_idx = lv_mov_tabix.
         ls_mov_index-row_count = 1.
         lv_index_open = abap_true.
       ELSE.
