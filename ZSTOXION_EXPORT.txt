@@ -160,6 +160,7 @@ TYPES: BEGIN OF ty_plant,
          dismm TYPE mdma-dismm,
          eisbe TYPE mdma-eisbe,
          plifz TYPE mdma-plifz,
+         plifzx TYPE mdma-plifzx,
          pstat TYPE mdma-pstat,
          loekz TYPE mdma-loekz,
        END OF ty_mdma,
@@ -417,7 +418,7 @@ START-OF-SELECTION.
 
 * --- 2) Dispobereiche (MDMA, je Material/Werk) kennzeichnen -----------
   DATA lt_mdma TYPE tt_mdma.
-  SELECT matnr, berid, werks, dismm, eisbe, plifz, pstat, loekz
+  SELECT matnr, berid, werks, dismm, eisbe, plifz, plifzx, pstat, loekz
     FROM mdma
     INTO CORRESPONDING FIELDS OF TABLE @lt_mdma
     FOR ALL ENTRIES IN @gt_marc
@@ -1567,15 +1568,17 @@ FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma
   CLEAR gt_lines.
   APPEND |Materialnummer{ gc_tab }Dispobereich{ gc_tab }Werk{ gc_tab }| &&
          |Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
-         |Planlieferzeit (Kalendertage){ gc_tab }Pflegestatus (D/E/L){ gc_tab }| &&
+         |Planlieferzeit (Kalendertage){ gc_tab }Planlieferzeit beruecksichtigen{ gc_tab }| &&
+         |Pflegestatus (D/E/L){ gc_tab }| &&
          |Loeschvormerkung| TO gt_lines.
   APPEND |MATNR{ gc_tab }BERID{ gc_tab }WERKS{ gc_tab }DISMM{ gc_tab }| &&
-         |EISBE{ gc_tab }PLIFZ{ gc_tab }PSTAT{ gc_tab }LOEKZ| TO gt_lines.
+         |EISBE{ gc_tab }PLIFZ{ gc_tab }PLIFZX{ gc_tab }PSTAT{ gc_tab }LOEKZ| TO gt_lines.
   LOOP AT it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma>).
     APPEND |{ <ls_mdma>-matnr }{ gc_tab }{ <ls_mdma>-berid }{ gc_tab }| &&
            |{ <ls_mdma>-werks }{ gc_tab }{ <ls_mdma>-dismm }{ gc_tab }| &&
            |{ <ls_mdma>-eisbe NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mdma>-plifz NUMBER = RAW }{ gc_tab }{ <ls_mdma>-pstat }{ gc_tab }| &&
+           |{ <ls_mdma>-plifz NUMBER = RAW }{ gc_tab }{ <ls_mdma>-plifzx }{ gc_tab }| &&
+           |{ <ls_mdma>-pstat }{ gc_tab }| &&
            |{ <ls_mdma>-loekz }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MDMA' gt_lines.
