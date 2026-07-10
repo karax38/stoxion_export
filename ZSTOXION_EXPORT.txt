@@ -52,9 +52,9 @@ CONSTANTS: gc_abc_src_marc TYPE c LENGTH 12 VALUE 'MARC',
            gc_abc_src_init TYPE c LENGTH 12 VALUE 'INITIAL'.
 
 CONSTANTS: gc_mc40_days  TYPE i VALUE 365,
-           gc_mc40_agpra TYPE i VALUE 50,
+           gc_mc40_agpra TYPE i VALUE 20,
            gc_mc40_agprb TYPE i VALUE 30,
-           gc_mc40_agprc TYPE i VALUE 10.
+           gc_mc40_agprc TYPE i VALUE 50.
 
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
