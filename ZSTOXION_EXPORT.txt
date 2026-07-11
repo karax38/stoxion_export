@@ -50,12 +50,6 @@ CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horiz
 CONSTANTS: gc_abc_src_marc TYPE c LENGTH 12 VALUE 'MARC',
            gc_abc_src_init TYPE c LENGTH 12 VALUE 'INITIAL'.
 
-DATA: gv_t_org      TYPE c LENGTH 70,
-      gv_t_mov      TYPE c LENGTH 70,
-      gv_t_flt      TYPE c LENGTH 70,
-      gv_t_tgt      TYPE c LENGTH 70,
-      gv_budat_info TYPE c LENGTH 83.
-
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
 *----------------------------------------------------------------------*
@@ -71,7 +65,7 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE gv_t_org.
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_t_mov.
-  SELECTION-SCREEN COMMENT /1(83) gv_budat_info.
+  SELECTION-SCREEN COMMENT /1(79) gv_budat_info.
   SELECT-OPTIONS: s_budat FOR mkpf-budat NO-DISPLAY, "Buchungsdatum technisch
                   s_bwart FOR mseg-bwart,              "Bewegungsart
                   s_sobkz FOR mseg-sobkz.              "Sonderbestand (opt.)
@@ -316,10 +310,10 @@ AT SELECTION-SCREEN OUTPUT.
 
   IF sy-langu = 'D'.
     gv_budat_info =
-      |Exportzeitraum (autom.): { lv_info_from } bis { lv_info_to }; max.36 Mon.; lauf. Monat ausg.|.
+      |Autom. Zeitraum: { lv_info_from } bis { lv_info_to }; max. 36 Mon.; lauf. Mon. ausg.|.
   ELSE.
     gv_budat_info =
-      |Export period (auto): { lv_info_from } to { lv_info_to }; max. 36 mo.; current mo. excluded.|.
+      |Auto period: { lv_info_from } to { lv_info_to }; max. 36 mo.; current mo. excluded.|.
   ENDIF.
 
 *----------------------------------------------------------------------*
