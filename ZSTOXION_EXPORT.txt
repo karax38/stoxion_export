@@ -65,7 +65,7 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE gv_t_org.
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_t_mov.
-  SELECTION-SCREEN COMMENT /1(79) gv_budat_info.
+  SELECTION-SCREEN COMMENT /1(79) gv_budi.
   SELECT-OPTIONS: s_budat FOR mkpf-budat NO-DISPLAY, "Buchungsdatum technisch
                   s_bwart FOR mseg-bwart,              "Bewegungsart
                   s_sobkz FOR mseg-sobkz.              "Sonderbestand (opt.)
@@ -309,10 +309,10 @@ AT SELECTION-SCREEN OUTPUT.
   WRITE lv_info_last_day TO lv_info_to.
 
   IF sy-langu = 'D'.
-    gv_budat_info =
+    gv_budi =
       |Autom. Zeitraum: { lv_info_from } bis { lv_info_to }; max. 36 Mon.; lauf. Mon. ausg.|.
   ELSE.
-    gv_budat_info =
+    gv_budi =
       |Auto period: { lv_info_from } to { lv_info_to }; max. 36 mo.; current mo. excluded.|.
   ENDIF.
 
