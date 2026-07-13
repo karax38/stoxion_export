@@ -108,6 +108,12 @@ TYPES: BEGIN OF ty_plant,
          maabc_eff   TYPE marc-maabc,
          maabc_src   TYPE c LENGTH 12,
          wzeit TYPE marc-wzeit,
+         disls TYPE marc-disls,
+         bstfe TYPE marc-bstfe,
+         bstmi TYPE marc-bstmi,
+         bstma TYPE marc-bstma,
+         bstrf TYPE marc-bstrf,
+         mabst TYPE marc-mabst,
          mtart TYPE mara-mtart,
          meins TYPE mara-meins,
        END OF ty_marc,
@@ -376,6 +382,7 @@ START-OF-SELECTION.
 * --- 1) Kandidaten: MARC + MARA mit Stammdatenfiltern -----------------
   SELECT c~matnr, c~werks, c~lvorm, c~dismm, c~eisbe, c~plifz,
          c~webaz, c~pstat, c~maabc, c~wzeit,
+         c~disls, c~bstfe, c~bstmi, c~bstma, c~bstrf, c~mabst,
          a~mtart, a~meins
     FROM marc AS c
     INNER JOIN mara AS a ON a~matnr = c~matnr
@@ -1189,10 +1196,13 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
          |Loeschvormerkung{ gc_tab }Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
          |Planlieferzeit (Kalendertage){ gc_tab }Wareneingangsbearbeitungszeit (Werktage){ gc_tab }| &&
          |Pflegestatus (D/E/L){ gc_tab }ABC-Indikator{ gc_tab }ABC-Quelle{ gc_tab }| &&
-         |ABC-Indikator Original{ gc_tab }Wiederbeschaffungszeit (optional)| TO gt_lines.
+         |ABC-Indikator Original{ gc_tab }Wiederbeschaffungszeit (optional){ gc_tab }| &&
+         |Dispolosgröße{ gc_tab }Feste Losgröße{ gc_tab }Mindestlosgröße{ gc_tab }| &&
+         |Höchstlosgröße{ gc_tab }Rundungswert{ gc_tab }Höchstbestand| TO gt_lines.
   APPEND |MATNR{ gc_tab }WERKS{ gc_tab }DIBER{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
          |PLIFZ{ gc_tab }WEBAZ{ gc_tab }PSTAT{ gc_tab }MAABC{ gc_tab }MAABC_SOURCE{ gc_tab }| &&
-         |MAABC_ORIGINAL{ gc_tab }WZEIT| TO gt_lines.
+         |MAABC_ORIGINAL{ gc_tab }WZEIT{ gc_tab }DISLS{ gc_tab }BSTFE{ gc_tab }BSTMI{ gc_tab }| &&
+         |BSTMA{ gc_tab }BSTRF{ gc_tab }MABST| TO gt_lines.
   LOOP AT it_marc ASSIGNING FIELD-SYMBOL(<ls_marc>).
     APPEND |{ <ls_marc>-matnr }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
            |{ <ls_marc>-diber }{ gc_tab }{ <ls_marc>-lvorm }{ gc_tab }| &&
@@ -1202,7 +1212,12 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
            |{ <ls_marc>-webaz NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_marc>-pstat }{ gc_tab }{ <ls_marc>-maabc }{ gc_tab }| &&
            |{ <ls_marc>-maabc_src }{ gc_tab }{ <ls_marc>-maabc_sap }{ gc_tab }| &&
-           |{ <ls_marc>-wzeit NUMBER = RAW }| TO gt_lines.
+           |{ <ls_marc>-wzeit NUMBER = RAW }{ gc_tab }{ <ls_marc>-disls }{ gc_tab }| &&
+           |{ <ls_marc>-bstfe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-bstmi NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-bstma NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-bstrf NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-mabst NUMBER = RAW }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MARC' gt_lines.
 
