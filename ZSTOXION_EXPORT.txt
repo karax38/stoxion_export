@@ -163,6 +163,7 @@ TYPES: BEGIN OF ty_plant,
          stprs TYPE mbew-stprs,
          verpr TYPE mbew-verpr,
          peinh TYPE mbew-peinh,
+         salk3 TYPE mbew-salk3,
          lvorm TYPE mbew-lvorm,
        END OF ty_mbew,
        BEGIN OF ty_t006,
@@ -471,7 +472,7 @@ START-OF-SELECTION.
 
 * --- 5) MBEW (je Material + Bewertungskreis) --------------------------
   DATA lt_mbew TYPE tt_mbew.
-  SELECT matnr, bwkey, vprsv, stprs, verpr, peinh, lvorm
+  SELECT matnr, bwkey, vprsv, stprs, verpr, peinh, salk3, lvorm
     FROM mbew
     INTO CORRESPONDING FIELDS OF TABLE @lt_mbew
     FOR ALL ENTRIES IN @gt_marc
@@ -1208,14 +1209,15 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
   CLEAR gt_lines.
   APPEND |Materialnummer{ gc_tab }Bewertungskreis{ gc_tab }Preissteuerung{ gc_tab }| &&
          |Standardpreis{ gc_tab }Gleitender Durchschnittspreis{ gc_tab }| &&
-         |Preiseinheit{ gc_tab }Loeschvormerkung| TO gt_lines.
+         |Preiseinheit{ gc_tab }Aktueller Bestandswert{ gc_tab }Loeschvormerkung| TO gt_lines.
   APPEND |MATNR{ gc_tab }BWKEY{ gc_tab }VPRSV{ gc_tab }STPRS{ gc_tab }| &&
-         |VERPR{ gc_tab }PEINH{ gc_tab }LVORM| TO gt_lines.
+         |VERPR{ gc_tab }PEINH{ gc_tab }SALK3{ gc_tab }LVORM| TO gt_lines.
   LOOP AT it_mbew ASSIGNING FIELD-SYMBOL(<ls_mbew>).
     APPEND |{ <ls_mbew>-matnr }{ gc_tab }{ <ls_mbew>-bwkey }{ gc_tab }| &&
            |{ <ls_mbew>-vprsv }{ gc_tab }{ <ls_mbew>-stprs NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_mbew>-verpr NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_mbew>-peinh NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mbew>-salk3 NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_mbew>-lvorm }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MBEW' gt_lines.
