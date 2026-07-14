@@ -63,12 +63,6 @@ CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horiz
 CONSTANTS: gc_abc_src_marc TYPE c LENGTH 12 VALUE 'MARC',
            gc_abc_src_init TYPE c LENGTH 12 VALUE 'INITIAL'.
 
-DATA: gv_t_org TYPE c LENGTH 79,
-      gv_t_mov TYPE c LENGTH 79,
-      gv_t_flt TYPE c LENGTH 79,
-      gv_t_tgt TYPE c LENGTH 79,
-      gv_budi  TYPE c LENGTH 79.
-
 *----------------------------------------------------------------------*
 * Selektionsbildschirm
 *----------------------------------------------------------------------*
