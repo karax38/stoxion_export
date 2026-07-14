@@ -31,6 +31,8 @@
 *&
 *& Bewegungen:
 *&   - MATDOC exportiert ein fest definiertes Bewegungsarten-Set.
+*&   - Echte Stornos zu exportierten Originalbelegen werden ueber
+*&     SJAHR/SMBLN/SMBLP zusaetzlich bis zum Exportdatum mitgezogen.
 *&   - Sonderbestandskennzeichen (SOBKZ) werden roh exportiert.
 *&
 *& Format   : Keine Format-/Headerformatierung im Workbook. Alle Zellen
@@ -158,6 +160,11 @@ TYPES: BEGIN OF ty_plant,
          smbln TYPE mseg-smbln,
          smblp TYPE mseg-smblp,
        END OF ty_mov,
+       BEGIN OF ty_mov_ref,
+         mjahr TYPE mjahr,
+         mblnr TYPE mblnr,
+         zeile TYPE mblpo,
+       END OF ty_mov_ref,
        BEGIN OF ty_mdma,
          matnr TYPE mdma-matnr,
          berid TYPE mdma-berid,
@@ -233,6 +240,8 @@ TYPES: BEGIN OF ty_plant,
        tt_mara  TYPE STANDARD TABLE OF ty_mara  WITH DEFAULT KEY,
        tt_key   TYPE STANDARD TABLE OF ty_marc_key WITH DEFAULT KEY,
        tt_mov   TYPE STANDARD TABLE OF ty_mov   WITH DEFAULT KEY,
+       tt_mov_ref TYPE SORTED TABLE OF ty_mov_ref
+                  WITH UNIQUE KEY mjahr mblnr zeile,
        tt_mdma  TYPE SORTED TABLE OF ty_mdma
                 WITH NON-UNIQUE KEY matnr werks berid,
        tt_mdma_std TYPE STANDARD TABLE OF ty_mdma WITH DEFAULT KEY,
@@ -334,10 +343,10 @@ AT SELECTION-SCREEN OUTPUT.
 
   IF sy-langu = 'D'.
     gv_budi =
-      |Zeitraum: { lv_info_from } bis { lv_info_to }; 36 Mon.; BWART fest, SOBKZ alle.|.
+      |Zeitraum: { lv_info_from }-{ lv_info_to }; 36M; BWART fest; Storno bis Export.|.
   ELSE.
     gv_budi =
-      |Period: { lv_info_from } to { lv_info_to }; 36 mo.; fixed BWART, all SOBKZ.|.
+      |Period: { lv_info_from }-{ lv_info_to }; 36M; fixed BWART; cancels to export.|.
   ENDIF.
 
 *----------------------------------------------------------------------*
@@ -563,6 +572,8 @@ START-OF-SELECTION.
 
   DATA: lt_chunk         TYPE tt_key,
         lt_mov           TYPE tt_mov,
+        lt_storno_mov    TYPE tt_mov,
+        lt_storno_ref    TYPE tt_mov_ref,
         lt_book_marc     TYPE tt_marc,
         lt_book_mov      TYPE tt_mov,
         lt_bwart         TYPE tt_bwart_range,
@@ -629,6 +640,31 @@ START-OF-SELECTION.
         AND m~werks =  @lt_chunk-werks
         AND m~bwart IN @lt_bwart
         AND k~budat IN @s_budat.
+
+    PERFORM build_storno_ref_keys
+      USING lt_mov
+      CHANGING lt_storno_ref.
+
+    IF lt_storno_ref IS NOT INITIAL.
+      CLEAR lt_storno_mov.
+      SELECT m~matnr, m~werks, m~lgort, m~bwart, m~sobkz, m~shkzg, m~menge,
+             k~budat, m~mjahr, m~mblnr, m~zeile,
+             m~sjahr, m~smbln, m~smblp
+        FROM mseg AS m
+        INNER JOIN mkpf AS k
+          ON  k~mblnr = m~mblnr
+          AND k~mjahr = m~mjahr
+        INTO CORRESPONDING FIELDS OF TABLE @lt_storno_mov
+        FOR ALL ENTRIES IN @lt_storno_ref
+        WHERE m~sjahr = @lt_storno_ref-mjahr
+          AND m~smbln = @lt_storno_ref-mblnr
+          AND m~smblp = @lt_storno_ref-zeile
+          AND k~budat <= @sy-datum.
+
+      PERFORM append_unique_movements
+        USING lt_storno_mov
+        CHANGING lt_mov.
+    ENDIF.
 
     SORT lt_mov BY matnr werks budat mblnr zeile.
 
@@ -728,7 +764,7 @@ START-OF-SELECTION.
                                      lt_mard.
     CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
   ENDIF.
-  CLEAR: lt_chunk, lt_mov, lt_mov_index.
+  CLEAR: lt_chunk, lt_mov, lt_storno_mov, lt_storno_ref, lt_mov_index.
 
   PERFORM write_export_result.
 
@@ -736,6 +772,56 @@ START-OF-SELECTION.
           |{ lines( gt_marc ) } Material/Werk-Kombinationen, | &&
           |{ lv_total } Bewegungen, | &&
           |{ gv_workbook_count } Arbeitsmappe(n).| TYPE 'S'.
+
+*&---------------------------------------------------------------------*
+*& FORM has_storno_reference - echte Stornoreferenz pruefen
+*&---------------------------------------------------------------------*
+FORM has_storno_reference USING is_mov TYPE ty_mov
+                          CHANGING cv_has_reference TYPE abap_bool.
+
+  cv_has_reference = xsdbool( is_mov-sjahr IS NOT INITIAL AND
+                              is_mov-smbln IS NOT INITIAL AND
+                              is_mov-smblp IS NOT INITIAL ).
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_storno_ref_keys - Originalbelegschluessel deduplizieren
+*&---------------------------------------------------------------------*
+FORM build_storno_ref_keys USING it_mov TYPE tt_mov
+                           CHANGING ct_ref TYPE tt_mov_ref.
+
+  CLEAR ct_ref.
+  LOOP AT it_mov ASSIGNING FIELD-SYMBOL(<ls_mov_ref_source>).
+    IF <ls_mov_ref_source>-mjahr IS INITIAL OR
+       <ls_mov_ref_source>-mblnr IS INITIAL OR
+       <ls_mov_ref_source>-zeile IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    INSERT VALUE ty_mov_ref(
+      mjahr = <ls_mov_ref_source>-mjahr
+      mblnr = <ls_mov_ref_source>-mblnr
+      zeile = <ls_mov_ref_source>-zeile ) INTO TABLE ct_ref.
+  ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM append_unique_movements - Bewegungen per Belegzeile deduplizieren
+*&---------------------------------------------------------------------*
+FORM append_unique_movements USING it_add_mov TYPE tt_mov
+                             CHANGING ct_mov TYPE tt_mov.
+
+  IF it_add_mov IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  APPEND LINES OF it_add_mov TO ct_mov.
+  SORT ct_mov BY mjahr mblnr zeile.
+  DELETE ADJACENT DUPLICATES FROM ct_mov COMPARING mjahr mblnr zeile.
+
+ENDFORM.
 
 *&---------------------------------------------------------------------*
 *& FORM build_fixed_bwart_range - festes Bewegungsarten-Set
@@ -2138,6 +2224,15 @@ CLASS ltcl_demand_history DEFINITION FINAL FOR TESTING
     METHODS set_budat_range FOR TESTING.
 ENDCLASS.
 
+CLASS ltcl_storno_movements DEFINITION FINAL FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+  PRIVATE SECTION.
+    METHODS build_refs_deduplicates FOR TESTING.
+    METHODS detects_complete_reference FOR TESTING.
+    METHODS merge_deduplicates_items FOR TESTING.
+ENDCLASS.
+
 CLASS ltcl_dismm_filter DEFINITION FINAL FOR TESTING
   DURATION SHORT
   RISK LEVEL HARMLESS.
@@ -2151,6 +2246,114 @@ CLASS ltcl_dismm_filter DEFINITION FINAL FOR TESTING
       IMPORTING is_marc     TYPE ty_marc
                 it_mdma     TYPE tt_mdma
                 iv_expected TYPE abap_bool.
+ENDCLASS.
+
+CLASS ltcl_storno_movements IMPLEMENTATION.
+
+  METHOD build_refs_deduplicates.
+    DATA lt_mov TYPE tt_mov.
+    DATA lt_ref TYPE tt_mov_ref.
+
+    APPEND VALUE ty_mov( mjahr = '2024'
+                         mblnr = '4900000001'
+                         zeile = '0001' ) TO lt_mov.
+    APPEND VALUE ty_mov( mjahr = '2024'
+                         mblnr = '4900000001'
+                         zeile = '0001' ) TO lt_mov.
+    APPEND VALUE ty_mov( mjahr = '2024'
+                         mblnr = '4900000002'
+                         zeile = '0001' ) TO lt_mov.
+
+    PERFORM build_storno_ref_keys
+      USING lt_mov
+      CHANGING lt_ref.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = 2
+      act = lines( lt_ref )
+      msg = 'Original-Referenzen muessen je Materialbelegzeile eindeutig sein.' ).
+
+    READ TABLE lt_ref TRANSPORTING NO FIELDS
+      WITH TABLE KEY mjahr = '2024'
+                     mblnr = '4900000001'
+                     zeile = '0001'.
+    cl_abap_unit_assert=>assert_equals(
+      exp = 0
+      act = sy-subrc
+      msg = 'Der erste Originalbeleg muss als Storno-Referenz vorhanden sein.' ).
+  ENDMETHOD.
+
+  METHOD detects_complete_reference.
+    DATA lv_has_reference TYPE abap_bool.
+    DATA ls_mov           TYPE ty_mov.
+
+    ls_mov-sjahr = '2024'.
+    ls_mov-smbln = '4900000001'.
+    ls_mov-smblp = '0001'.
+    PERFORM has_storno_reference
+      USING ls_mov
+      CHANGING lv_has_reference.
+    cl_abap_unit_assert=>assert_true(
+      act = lv_has_reference
+      msg = 'Vollstaendig gefuellte SJAHR/SMBLN/SMBLP muessen erkannt werden.' ).
+
+    CLEAR ls_mov.
+    ls_mov-sjahr = '2024'.
+    ls_mov-smbln = '4900000001'.
+    PERFORM has_storno_reference
+      USING ls_mov
+      CHANGING lv_has_reference.
+    cl_abap_unit_assert=>assert_false(
+      act = lv_has_reference
+      msg = 'Unvollstaendige Stornoreferenzen duerfen nicht als echt gelten.' ).
+  ENDMETHOD.
+
+  METHOD merge_deduplicates_items.
+    DATA lt_mov TYPE tt_mov.
+    DATA lt_add TYPE tt_mov.
+
+    APPEND VALUE ty_mov( matnr = 'MAT-001'
+                         werks = '1000'
+                         bwart = '201'
+                         mjahr = '2024'
+                         mblnr = '4900000001'
+                         zeile = '0001' ) TO lt_mov.
+
+    APPEND VALUE ty_mov( matnr = 'MAT-001'
+                         werks = '1000'
+                         bwart = '201'
+                         mjahr = '2024'
+                         mblnr = '4900000001'
+                         zeile = '0001' ) TO lt_add.
+    APPEND VALUE ty_mov( matnr = 'MAT-001'
+                         werks = '1000'
+                         bwart = '202'
+                         mjahr = '2024'
+                         mblnr = '4900000002'
+                         zeile = '0001'
+                         sjahr = '2024'
+                         smbln = '4900000001'
+                         smblp = '0001' ) TO lt_add.
+
+    PERFORM append_unique_movements
+      USING lt_add
+      CHANGING lt_mov.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = 2
+      act = lines( lt_mov )
+      msg = 'Bereits selektierte Belegzeilen duerfen nicht doppelt exportiert werden.' ).
+
+    READ TABLE lt_mov TRANSPORTING NO FIELDS
+      WITH KEY mjahr = '2024'
+               mblnr = '4900000002'
+               zeile = '0001'.
+    cl_abap_unit_assert=>assert_equals(
+      exp = 0
+      act = sy-subrc
+      msg = 'Die zusaetzliche Storno-Belegzeile muss im Ergebnis bleiben.' ).
+  ENDMETHOD.
+
 ENDCLASS.
 
 CLASS ltcl_dismm_filter IMPLEMENTATION.
