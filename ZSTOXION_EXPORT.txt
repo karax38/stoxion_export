@@ -1532,7 +1532,7 @@ FORM build_common_sheets USING it_plants TYPE tt_plant
   APPEND |Maßeinheit{ gc_tab }Anzahl Dezimalstellen| TO gt_lines.
   APPEND |MSEHI{ gc_tab }DECAN|                        TO gt_lines.
   LOOP AT it_t006 ASSIGNING FIELD-SYMBOL(<ls_t006>).
-    APPEND |{ <ls_t006>-msehi }{ gc_tab }{ <ls_t006>-decan NUMBER = RAW }| TO gt_lines.
+    APPEND |{ <ls_t006>-msehi }{ gc_tab }{ <ls_t006>-decan }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'T006' gt_lines.
 
@@ -1568,7 +1568,7 @@ FORM build_common_sheets USING it_plants TYPE tt_plant
   APPEND |DISLS{ gc_tab }LOSVF{ gc_tab }LOSKZ{ gc_tab }PERAZ{ gc_tab }LOSLT| TO gt_lines.
   LOOP AT it_v439a ASSIGNING FIELD-SYMBOL(<ls_v439a>).
     APPEND |{ <ls_v439a>-disls }{ gc_tab }{ <ls_v439a>-losvf }{ gc_tab }| &&
-           |{ <ls_v439a>-loskz }{ gc_tab }{ <ls_v439a>-peraz NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_v439a>-loskz }{ gc_tab }{ <ls_v439a>-peraz }{ gc_tab }| &&
            |{ <ls_v439a>-loslt }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'V439A' gt_lines.
@@ -1629,20 +1629,20 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
     APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
            |{ <ls_marc>-diber }{ gc_tab }{ <ls_marc>-lvorm }{ gc_tab }| &&
            |{ <ls_marc>-dismm }{ gc_tab }| &&
-           |{ <ls_marc>-eisbe NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-plifz NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-webaz NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-eisbe }{ gc_tab }| &&
+           |{ <ls_marc>-plifz }{ gc_tab }| &&
+           |{ <ls_marc>-webaz }{ gc_tab }| &&
            |{ <ls_marc>-pstat }{ gc_tab }{ <ls_marc>-maabc }{ gc_tab }| &&
            |{ <ls_marc>-maabc_src }{ gc_tab }{ <ls_marc>-maabc_sap }{ gc_tab }| &&
-           |{ <ls_marc>-wzeit NUMBER = RAW }{ gc_tab }{ <ls_marc>-disls }{ gc_tab }| &&
-           |{ <ls_marc>-bstfe NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-bstmi NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-bstma NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-bstrf NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-mabst NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-minbe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-wzeit }{ gc_tab }{ <ls_marc>-disls }{ gc_tab }| &&
+           |{ <ls_marc>-bstfe }{ gc_tab }| &&
+           |{ <ls_marc>-bstmi }{ gc_tab }| &&
+           |{ <ls_marc>-bstma }{ gc_tab }| &&
+           |{ <ls_marc>-bstrf }{ gc_tab }| &&
+           |{ <ls_marc>-mabst }{ gc_tab }| &&
+           |{ <ls_marc>-minbe }{ gc_tab }| &&
            |{ <ls_marc>-shflg }{ gc_tab }| &&
-           |{ <ls_marc>-shzet NUMBER = RAW }| TO gt_lines.
+           |{ <ls_marc>-shzet }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MARC' gt_lines.
 
@@ -1657,11 +1657,11 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
   LOOP AT it_mbew ASSIGNING FIELD-SYMBOL(<ls_mbew>).
     PERFORM matnr_out USING <ls_mbew>-matnr CHANGING lv_matnr_out.
     APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_mbew>-bwkey }{ gc_tab }| &&
-           |{ <ls_mbew>-vprsv }{ gc_tab }{ <ls_mbew>-stprs NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mbew>-verpr NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mbew>-peinh NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mbew>-salk3 NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mbew>-lbkum NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mbew>-vprsv }{ gc_tab }{ <ls_mbew>-stprs }{ gc_tab }| &&
+           |{ <ls_mbew>-verpr }{ gc_tab }| &&
+           |{ <ls_mbew>-peinh }{ gc_tab }| &&
+           |{ <ls_mbew>-salk3 }{ gc_tab }| &&
+           |{ <ls_mbew>-lbkum }{ gc_tab }| &&
            |{ <ls_mbew>-lvorm }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MBEW' gt_lines.
@@ -1677,10 +1677,10 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
     PERFORM matnr_out USING <ls_mard>-matnr CHANGING lv_matnr_out.
     APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_mard>-werks }{ gc_tab }| &&
            |{ <ls_mard>-lgort }{ gc_tab }| &&
-           |{ <ls_mard>-labst NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mard>-insme NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mard>-speme NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mard>-einme NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mard>-labst }{ gc_tab }| &&
+           |{ <ls_mard>-insme }{ gc_tab }| &&
+           |{ <ls_mard>-speme }{ gc_tab }| &&
+           |{ <ls_mard>-einme }{ gc_tab }| &&
            |{ <ls_mard>-lvorm }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MARD' gt_lines.
@@ -1712,17 +1712,17 @@ FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma_std
     PERFORM matnr_out USING <ls_mdma>-matnr CHANGING lv_matnr_out.
     APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_mdma>-berid }{ gc_tab }| &&
            |{ <ls_mdma>-werks }{ gc_tab }{ <ls_mdma>-dismm }{ gc_tab }| &&
-           |{ <ls_mdma>-eisbe NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mdma>-plifz NUMBER = RAW }{ gc_tab }{ <ls_mdma>-plifzx }{ gc_tab }| &&
+           |{ <ls_mdma>-eisbe }{ gc_tab }| &&
+           |{ <ls_mdma>-plifz }{ gc_tab }{ <ls_mdma>-plifzx }{ gc_tab }| &&
            |{ <ls_mdma>-pstat }{ gc_tab }| &&
            |{ <ls_mdma>-loekz }{ gc_tab }| &&
-           |{ <ls_mdma>-minbe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mdma>-minbe }{ gc_tab }| &&
            |{ <ls_mdma>-disls }{ gc_tab }| &&
-           |{ <ls_mdma>-bstfe NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mdma>-bstmi NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mdma>-bstma NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mdma>-bstrf NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_mdma>-mabst NUMBER = RAW }| TO gt_lines.
+           |{ <ls_mdma>-bstfe }{ gc_tab }| &&
+           |{ <ls_mdma>-bstmi }{ gc_tab }| &&
+           |{ <ls_mdma>-bstma }{ gc_tab }| &&
+           |{ <ls_mdma>-bstrf }{ gc_tab }| &&
+           |{ <ls_mdma>-mabst }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MDMA' gt_lines.
 
@@ -1768,7 +1768,7 @@ FORM build_matdoc_sheet USING it_mov TYPE tt_mov.
            |{ <ls_mov>-lgort }{ gc_tab }{ <ls_mov>-bwart }{ gc_tab }| &&
            |{ <ls_mov>-sobkz }{ gc_tab }| &&
            |{ <ls_mov>-shkzg }{ gc_tab }| &&
-           |{ <ls_mov>-menge NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mov>-menge }{ gc_tab }| &&
            |{ <ls_mov>-budat DATE = RAW }{ gc_tab }| &&
            |{ <ls_mov>-mjahr }{ gc_tab }{ <ls_mov>-mblnr }{ gc_tab }| &&
            |{ <ls_mov>-zeile }{ gc_tab }{ <ls_mov>-sjahr }{ gc_tab }| &&
@@ -2791,6 +2791,8 @@ CLASS ltcl_demand_history IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD set_budat_range.
+    DATA ls_budat LIKE LINE OF s_budat.
+
     PERFORM set_demand_history_budat
       USING '20230101'
             '20230401'.
@@ -2798,16 +2800,16 @@ CLASS ltcl_demand_history IMPLEMENTATION.
     cl_abap_unit_assert=>assert_equals(
       exp = 1
       act = lines( s_budat[] ) ).
-    READ TABLE s_budat INDEX 1.
+    READ TABLE s_budat INTO ls_budat INDEX 1.
     cl_abap_unit_assert=>assert_equals(
       exp = 'BT'
-      act = s_budat-option ).
+      act = ls_budat-option ).
     cl_abap_unit_assert=>assert_equals(
       exp = '20230101'
-      act = s_budat-low ).
+      act = ls_budat-low ).
     cl_abap_unit_assert=>assert_equals(
       exp = '20230331'
-      act = s_budat-high
+      act = ls_budat-high
       msg = 'Der laufende Monat wird durch High = window_end - 1 ausgeschlossen.' ).
   ENDMETHOD.
 
