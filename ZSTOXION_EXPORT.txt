@@ -31,8 +31,14 @@
 *&
 *& Bewegungen:
 *&   - MATDOC exportiert ein fest definiertes Bewegungsarten-Set.
-*&   - Echte Stornos zu exportierten Originalbelegen werden ueber
-*&     SJAHR/SMBLN/SMBLP zusaetzlich bis zum Exportdatum mitgezogen.
+*&   - Stornos werden ueber ein festes Gegenbewegungsarten-Set selektiert
+*&     (202/262/282/544/552/602/634/642/644/646/312/314/316), damit der
+*&     Zugriff ueber den MSEG-Index MATNR/WERKS/BWART laeuft.
+*&   - Aus dieser Vorauswahl bleiben nur Bewegungen mit echter Storno-
+*&     referenz: SJAHR/SMBLN/SMBLP muessen vollstaendig gefuellt sein und
+*&     auf einen exportierten Originalbeleg zeigen. Die Pruefung erfolgt
+*&     im ABAP (filter_real_storno_movements), nicht auf der Datenbank.
+*&   - Der Storno-Zeitraum reicht vom Fensterbeginn bis zum Exportdatum.
 *&   - Sonderbestandskennzeichen (SOBKZ) werden roh exportiert.
 *&
 *& Format   : Keine Format-/Headerformatierung im Workbook. Alle Zellen
@@ -1248,10 +1254,6 @@ FORM load_mdlv CHANGING ct_mdlv TYPE tt_mdlv.
   TRY.
       lr_type_descr = cl_abap_typedescr=>describe_by_name( 'MDLV' ).
       lr_struct_descr ?= lr_type_descr.
-      IF lr_struct_descr IS INITIAL.
-        MESSAGE 'MDLV-Strukturbeschreibung konnte nicht ermittelt werden.'
-          TYPE 'E'.
-      ENDIF.
       lr_table_descr = cl_abap_tabledescr=>create(
                          p_line_type = lr_struct_descr ).
       CREATE DATA lr_data TYPE HANDLE lr_table_descr.
@@ -2530,9 +2532,8 @@ CLASS ltcl_storno_movements IMPLEMENTATION.
       msg = 'Nur echte Stornos mit Referenz auf exportierte Originalbelege duerfen bleiben.' ).
 
     READ TABLE lt_storno_mov ASSIGNING FIELD-SYMBOL(<ls_storno_left>) INDEX 1.
-    cl_abap_unit_assert=>assert_equals(
+    cl_abap_unit_assert=>assert_subrc(
       exp = 0
-      act = sy-subrc
       msg = 'Eine gefilterte Stornozeile muss lesbar sein.' ).
     cl_abap_unit_assert=>assert_equals(
       exp = '4900000002'
