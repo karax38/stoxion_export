@@ -47,7 +47,7 @@
 *&---------------------------------------------------------------------*
 REPORT zstoxion_export.
 
-TABLES: mara, marc, mseg, mkpf, sscrfields.
+TABLES: mara, marc, mkpf, sscrfields.
 
 CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
            gc_chunk          TYPE i VALUE 250,      "Material/Werk je Bewegungs-Paket
@@ -235,6 +235,11 @@ TYPES: BEGIN OF ty_plant,
          werks TYPE t399d-werks,
          bztek TYPE t399d-bztek,
        END OF ty_t399d,
+       BEGIN OF ty_key_count,
+         matnr TYPE matnr,
+         werks TYPE werks_d,
+         rows  TYPE i,
+       END OF ty_key_count,
        tt_plant TYPE STANDARD TABLE OF ty_plant WITH DEFAULT KEY,
        tt_marc  TYPE STANDARD TABLE OF ty_marc  WITH DEFAULT KEY,
        tt_mara  TYPE STANDARD TABLE OF ty_mara  WITH DEFAULT KEY,
@@ -253,6 +258,8 @@ TYPES: BEGIN OF ty_plant,
        tt_t438a TYPE STANDARD TABLE OF ty_t438a WITH DEFAULT KEY,
        tt_v439a TYPE STANDARD TABLE OF ty_v439a WITH DEFAULT KEY,
        tt_t399d TYPE STANDARD TABLE OF ty_t399d WITH DEFAULT KEY,
+       tt_key_count TYPE HASHED TABLE OF ty_key_count
+                    WITH UNIQUE KEY matnr werks,
        tt_bwart_range TYPE RANGE OF mseg-bwart,
        tt_dismm_range TYPE RANGE OF marc-dismm,
        tt_string TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
@@ -436,7 +443,8 @@ START-OF-SELECTION.
 
 * --- 2) Dispobereiche (MDMA, je Material/Werk) bereinigen -------------
   DATA: lt_mdma TYPE tt_mdma,
-        lt_mdlv TYPE tt_mdlv.
+        lt_mdlv TYPE tt_mdlv,
+        lt_mdma_cnt TYPE tt_key_count.
 
   PERFORM load_mdlv CHANGING lt_mdlv.
 
@@ -448,9 +456,18 @@ START-OF-SELECTION.
     WHERE matnr = @gt_marc-matnr
       AND werks = @gt_marc-werks.
 
+  IF lt_mdma IS NOT INITIAL AND lt_mdlv IS INITIAL.
+    MESSAGE |MDMA-Einträge vorhanden, aber keine MDLV-Zuordnung zu den | &&
+            |selektierten Werken. Export abgebrochen, da Werksdispobereiche | &&
+            |nicht sicher ausgefiltert werden können.| TYPE 'E'.
+  ENDIF.
+
   PERFORM remove_plant_mrp_area_mdma
     USING lt_mdlv
     CHANGING lt_mdma.
+  PERFORM build_mdma_count_index
+    USING lt_mdma
+    CHANGING lt_mdma_cnt.
 
   LOOP AT gt_marc ASSIGNING <ls_marc>.
     READ TABLE lt_mdma TRANSPORTING NO FIELDS
@@ -527,6 +544,7 @@ START-OF-SELECTION.
 
 * --- 6) MARD (je Material + Werk + Lagerort) --------------------------
   DATA lt_mard TYPE tt_mard.
+  DATA lt_mard_cnt TYPE tt_key_count.
   SELECT matnr, werks, lgort, labst, insme, speme, einme, lvorm
     FROM mard
     INTO CORRESPONDING FIELDS OF TABLE @lt_mard
@@ -535,6 +553,9 @@ START-OF-SELECTION.
       AND werks = @gt_marc-werks.
   SORT lt_mard BY matnr werks lgort.
   DELETE ADJACENT DUPLICATES FROM lt_mard COMPARING matnr werks lgort.
+  PERFORM build_mard_count_index
+    USING lt_mard
+    CHANGING lt_mard_cnt.
 
 * --- 7) Customizing-/Konfig-Tabellen ----------------------------------
   DATA: lt_t006  TYPE tt_t006,
@@ -551,9 +572,14 @@ START-OF-SELECTION.
     INTO CORRESPONDING FIELDS OF TABLE @lt_t438a.
   SELECT a~disls, a~losvf, a~loskz, a~peraz, t~loslt
     FROM t439a AS a
-    INNER JOIN t439t AS t ON t~disls = a~disls
-    INTO CORRESPONDING FIELDS OF TABLE @lt_v439a
-    WHERE t~spras = @sy-langu.
+    LEFT OUTER JOIN t439t AS t
+      ON  t~disls = a~disls
+      AND t~spras = @sy-langu
+    INTO CORRESPONDING FIELDS OF TABLE @lt_v439a.
+  PERFORM fill_missing_v439a_texts CHANGING lt_v439a.
+  IF lt_v439a IS INITIAL.
+    MESSAGE 'Keine Losgrößenverfahren (T439A) gefunden.' TYPE 'E'.
+  ENDIF.
   SELECT werks, bztek FROM t399d
     INTO CORRESPONDING FIELDS OF TABLE @lt_t399d
     WHERE werks IN @s_werks.
@@ -564,10 +590,9 @@ START-OF-SELECTION.
 *----------------------------------------------------------------------*
 * --- MATDOC: Bewegungsdaten paketiert, Aufteilung am Zeilenlimit -------
 * Bewusst inkl. Stornoreferenzen (SJAHR/SMBLN/SMBLP): die Storno-
-* Bereinigung erfolgt in stoxion, daher hier roh exportieren.
-* MARD kann mehrere Lagerorte je Material/Werk liefern, ist aber kein
-* MATDOC-artiger Bulk-Reiter und wird nicht in diese Zeilenlimit-Pruefung
-* einbezogen.
+* Bereinigung erfolgt ueber echte Stornoreferenzen gegen exportierte
+* Originalbelege. MATDOC, MARD und MDMA werden gegen das Excel-Zeilenlimit
+* je Arbeitsmappe geprueft.
   PERFORM reset_result_writer.
 
   DATA: lt_chunk         TYPE tt_key,
@@ -577,15 +602,20 @@ START-OF-SELECTION.
         lt_book_marc     TYPE tt_marc,
         lt_book_mov      TYPE tt_mov,
         lt_bwart         TYPE tt_bwart_range,
+        lt_storno_bwart  TYPE tt_bwart_range,
         lv_history_window_end      TYPE sy-datum,
         lv_history_start_max       TYPE sy-datum,
         lv_total         TYPE i,
         lv_from          TYPE i,
         lv_to            TYPE i,
         lv_key_rows      TYPE i,
+        lv_key_mard_rows TYPE i,
+        lv_key_mdma_rows TYPE i,
         lv_mov_first_idx TYPE i,
         lv_mov_last_idx  TYPE i,
         lv_book_mov_rows TYPE i,
+        lv_book_mard_rows TYPE i,
+        lv_book_mdma_rows TYPE i,
         lv_max_data_rows TYPE i.
 
   TYPES: BEGIN OF ty_mov_index,
@@ -609,6 +639,7 @@ START-OF-SELECTION.
     USING lv_history_start_max
           lv_history_window_end.
   PERFORM build_fixed_bwart_range CHANGING lt_bwart.
+  PERFORM build_storno_bwart_range CHANGING lt_storno_bwart.
 
   lv_max_data_rows = p_maxrow - 2.               "2 Kopfzeilen je Reiter
   lv_from = 1.
@@ -655,12 +686,16 @@ START-OF-SELECTION.
           ON  k~mblnr = m~mblnr
           AND k~mjahr = m~mjahr
         INTO CORRESPONDING FIELDS OF TABLE @lt_storno_mov
-        FOR ALL ENTRIES IN @lt_storno_ref
-        WHERE m~sjahr = @lt_storno_ref-mjahr
-          AND m~smbln = @lt_storno_ref-mblnr
-          AND m~smblp = @lt_storno_ref-zeile
+        FOR ALL ENTRIES IN @lt_chunk
+        WHERE m~matnr =  @lt_chunk-matnr
+          AND m~werks =  @lt_chunk-werks
+          AND m~bwart IN @lt_storno_bwart
+          AND k~budat >= @lv_history_start_max
           AND k~budat <= @sy-datum.
 
+      PERFORM filter_real_storno_movements
+        USING lt_storno_ref
+        CHANGING lt_storno_mov.
       PERFORM append_unique_movements
         USING lt_storno_mov
         CHANGING lt_mov.
@@ -694,7 +729,8 @@ START-OF-SELECTION.
     ENDIF.
 
     LOOP AT lt_chunk ASSIGNING FIELD-SYMBOL(<ls_key>).
-      CLEAR: lv_key_rows, lv_mov_first_idx, lv_mov_last_idx.
+      CLEAR: lv_key_rows, lv_key_mard_rows, lv_key_mdma_rows,
+             lv_mov_first_idx, lv_mov_last_idx.
       READ TABLE lt_mov_index ASSIGNING FIELD-SYMBOL(<ls_mov_index>)
         WITH TABLE KEY matnr = <ls_key>-matnr
                        werks = <ls_key>-werks.
@@ -705,15 +741,43 @@ START-OF-SELECTION.
                         + <ls_mov_index>-row_count - 1.
       ENDIF.
 
+      READ TABLE lt_mard_cnt ASSIGNING FIELD-SYMBOL(<ls_mard_cnt>)
+        WITH TABLE KEY matnr = <ls_key>-matnr
+                       werks = <ls_key>-werks.
+      IF sy-subrc = 0.
+        lv_key_mard_rows = <ls_mard_cnt>-rows.
+      ENDIF.
+
+      READ TABLE lt_mdma_cnt ASSIGNING FIELD-SYMBOL(<ls_mdma_cnt>)
+        WITH TABLE KEY matnr = <ls_key>-matnr
+                       werks = <ls_key>-werks.
+      IF sy-subrc = 0.
+        lv_key_mdma_rows = <ls_mdma_cnt>-rows.
+      ENDIF.
+
       IF lv_key_rows > lv_max_data_rows.
         MESSAGE |Material/Werk { <ls_key>-matnr }/{ <ls_key>-werks } | &&
-                |ueberschreitet alleine das Zeilenlimit je Arbeitsmappe | &&
+                |ueberschreitet alleine das Zeilenlimit im Sheet MATDOC | &&
                 |({ lv_key_rows } Datenzeilen, max. { lv_max_data_rows }). | &&
                 |Bitte Zeitraum eingrenzen oder P_MAXROW erhoehen.| TYPE 'E'.
+      ENDIF.
+      IF lv_key_mard_rows > lv_max_data_rows.
+        MESSAGE |Material/Werk { <ls_key>-matnr }/{ <ls_key>-werks } | &&
+                |ueberschreitet alleine das Zeilenlimit im Sheet MARD | &&
+                |({ lv_key_mard_rows } Datenzeilen, max. { lv_max_data_rows }). | &&
+                |Bitte Lagerorte eingrenzen oder P_MAXROW erhoehen.| TYPE 'E'.
+      ENDIF.
+      IF lv_key_mdma_rows > lv_max_data_rows.
+        MESSAGE |Material/Werk { <ls_key>-matnr }/{ <ls_key>-werks } | &&
+                |ueberschreitet alleine das Zeilenlimit im Sheet MDMA | &&
+                |({ lv_key_mdma_rows } Datenzeilen, max. { lv_max_data_rows }). | &&
+                |Bitte Dispobereiche eingrenzen oder P_MAXROW erhoehen.| TYPE 'E'.
       ENDIF.
 
       IF lt_book_marc IS NOT INITIAL AND
          ( lv_book_mov_rows + lv_key_rows > lv_max_data_rows OR
+           lv_book_mard_rows + lv_key_mard_rows > lv_max_data_rows OR
+           lv_book_mdma_rows + lv_key_mdma_rows > lv_max_data_rows OR
            lines( lt_book_marc ) >= lv_max_data_rows ).
         PERFORM finalize_workbook USING lt_book_marc
                                         lt_book_mov
@@ -727,7 +791,8 @@ START-OF-SELECTION.
                                          lt_mdlv
                                          lt_mbew
                                          lt_mard.
-        CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
+        CLEAR: lt_book_marc, lt_book_mov,
+               lv_book_mov_rows, lv_book_mard_rows, lv_book_mdma_rows.
       ENDIF.
 
       READ TABLE gt_marc ASSIGNING <ls_marc>
@@ -744,6 +809,8 @@ START-OF-SELECTION.
           TO lt_book_mov.
       ENDIF.
       lv_book_mov_rows = lv_book_mov_rows + lv_key_rows.
+      lv_book_mard_rows = lv_book_mard_rows + lv_key_mard_rows.
+      lv_book_mdma_rows = lv_book_mdma_rows + lv_key_mdma_rows.
       lv_total = lv_total + lv_key_rows.
     ENDLOOP.
     CLEAR lt_mov_index.
@@ -762,7 +829,8 @@ START-OF-SELECTION.
                                      lt_mdlv
                                      lt_mbew
                                      lt_mard.
-    CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
+    CLEAR: lt_book_marc, lt_book_mov,
+           lv_book_mov_rows, lv_book_mard_rows, lv_book_mdma_rows.
   ENDIF.
   CLEAR: lt_chunk, lt_mov, lt_storno_mov, lt_storno_ref, lt_mov_index.
 
@@ -772,18 +840,6 @@ START-OF-SELECTION.
           |{ lines( gt_marc ) } Material/Werk-Kombinationen, | &&
           |{ lv_total } Bewegungen, | &&
           |{ gv_workbook_count } Arbeitsmappe(n).| TYPE 'S'.
-
-*&---------------------------------------------------------------------*
-*& FORM has_storno_reference - echte Stornoreferenz pruefen
-*&---------------------------------------------------------------------*
-FORM has_storno_reference USING is_mov TYPE ty_mov
-                          CHANGING cv_has_reference TYPE abap_bool.
-
-  cv_has_reference = xsdbool( is_mov-sjahr IS NOT INITIAL AND
-                              is_mov-smbln IS NOT INITIAL AND
-                              is_mov-smblp IS NOT INITIAL ).
-
-ENDFORM.
 
 *&---------------------------------------------------------------------*
 *& FORM build_storno_ref_keys - Originalbelegschluessel deduplizieren
@@ -804,6 +860,34 @@ FORM build_storno_ref_keys USING it_mov TYPE tt_mov
       mblnr = <ls_mov_ref_source>-mblnr
       zeile = <ls_mov_ref_source>-zeile ) INTO TABLE ct_ref.
   ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM filter_real_storno_movements - nur echte Stornos behalten
+*&---------------------------------------------------------------------*
+FORM filter_real_storno_movements USING it_ref TYPE tt_mov_ref
+                                  CHANGING ct_storno_mov TYPE tt_mov.
+
+  DATA lt_keep TYPE tt_mov.
+
+  LOOP AT ct_storno_mov ASSIGNING FIELD-SYMBOL(<ls_storno_mov>).
+    IF <ls_storno_mov>-sjahr IS INITIAL OR
+       <ls_storno_mov>-smbln IS INITIAL OR
+       <ls_storno_mov>-smblp IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+    READ TABLE it_ref TRANSPORTING NO FIELDS
+      WITH TABLE KEY mjahr = <ls_storno_mov>-sjahr
+                     mblnr = <ls_storno_mov>-smbln
+                     zeile = <ls_storno_mov>-smblp.
+    IF sy-subrc = 0.
+      APPEND <ls_storno_mov> TO lt_keep.
+    ENDIF.
+  ENDLOOP.
+
+  ct_storno_mov = lt_keep.
 
 ENDFORM.
 
@@ -841,9 +925,81 @@ FORM build_fixed_bwart_range CHANGING ct_bwart TYPE tt_bwart_range.
   APPEND VALUE #( sign = 'I' option = 'EQ' low = '643' ) TO ct_bwart.
   APPEND VALUE #( sign = 'I' option = 'EQ' low = '645' ) TO ct_bwart.
   APPEND VALUE #( sign = 'I' option = 'EQ' low = '311' ) TO ct_bwart.
-  APPEND VALUE #( sign = 'I' option = 'EQ' low = '312' ) TO ct_bwart.
   APPEND VALUE #( sign = 'I' option = 'EQ' low = '313' ) TO ct_bwart.
   APPEND VALUE #( sign = 'I' option = 'EQ' low = '315' ) TO ct_bwart.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_storno_bwart_range - Gegenbewegungsarten-Set
+*&---------------------------------------------------------------------*
+FORM build_storno_bwart_range CHANGING ct_bwart TYPE tt_bwart_range.
+
+  CLEAR ct_bwart.
+
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '202' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '262' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '282' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '544' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '552' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '602' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '634' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '642' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '644' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '646' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '312' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '314' ) TO ct_bwart.
+  APPEND VALUE #( sign = 'I' option = 'EQ' low = '316' ) TO ct_bwart.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_mard_count_index - MARD-Zeilen je Material/Werk zaehlen
+*&---------------------------------------------------------------------*
+FORM build_mard_count_index USING it_mard TYPE tt_mard
+                            CHANGING ct_count TYPE tt_key_count.
+
+  FIELD-SYMBOLS <ls_count> TYPE ty_key_count.
+
+  CLEAR ct_count.
+  LOOP AT it_mard ASSIGNING FIELD-SYMBOL(<ls_mard_count>).
+    READ TABLE ct_count ASSIGNING <ls_count>
+      WITH TABLE KEY matnr = <ls_mard_count>-matnr
+                     werks = <ls_mard_count>-werks.
+    IF sy-subrc = 0.
+      <ls_count>-rows = <ls_count>-rows + 1.
+    ELSE.
+      INSERT VALUE ty_key_count(
+        matnr = <ls_mard_count>-matnr
+        werks = <ls_mard_count>-werks
+        rows  = 1 ) INTO TABLE ct_count.
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_mdma_count_index - MDMA-Zeilen je Material/Werk zaehlen
+*&---------------------------------------------------------------------*
+FORM build_mdma_count_index USING it_mdma TYPE tt_mdma
+                            CHANGING ct_count TYPE tt_key_count.
+
+  FIELD-SYMBOLS <ls_count> TYPE ty_key_count.
+
+  CLEAR ct_count.
+  LOOP AT it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma_count>).
+    READ TABLE ct_count ASSIGNING <ls_count>
+      WITH TABLE KEY matnr = <ls_mdma_count>-matnr
+                     werks = <ls_mdma_count>-werks.
+    IF sy-subrc = 0.
+      <ls_count>-rows = <ls_count>-rows + 1.
+    ELSE.
+      INSERT VALUE ty_key_count(
+        matnr = <ls_mdma_count>-matnr
+        werks = <ls_mdma_count>-werks
+        rows  = 1 ) INTO TABLE ct_count.
+    ENDIF.
+  ENDLOOP.
 
 ENDFORM.
 
@@ -1092,17 +1248,23 @@ FORM load_mdlv CHANGING ct_mdlv TYPE tt_mdlv.
   TRY.
       lr_type_descr = cl_abap_typedescr=>describe_by_name( 'MDLV' ).
       lr_struct_descr ?= lr_type_descr.
+      IF lr_struct_descr IS INITIAL.
+        MESSAGE 'MDLV-Strukturbeschreibung konnte nicht ermittelt werden.'
+          TYPE 'E'.
+      ENDIF.
       lr_table_descr = cl_abap_tabledescr=>create(
                          p_line_type = lr_struct_descr ).
       CREATE DATA lr_data TYPE HANDLE lr_table_descr.
       ASSIGN lr_data->* TO <lt_raw>.
       IF <lt_raw> IS NOT ASSIGNED.
-        RETURN.
+        MESSAGE 'MDLV-Datentabelle konnte nicht zugewiesen werden.'
+          TYPE 'E'.
       ENDIF.
 
       SELECT * FROM (lv_tabname) INTO TABLE @<lt_raw>.
-    CATCH cx_root.
-      RETURN.
+    CATCH cx_root INTO DATA(lx_mdlv).
+      MESSAGE |MDLV konnte nicht gelesen werden: { lx_mdlv->get_text( ) }|
+        TYPE 'E'.
   ENDTRY.
 
   LOOP AT <lt_raw> ASSIGNING <ls_raw>.
@@ -1190,6 +1352,41 @@ FORM map_config_deprecation USING iv_raw    TYPE string
     WHEN OTHERS.
       cv_text = iv_raw.
   ENDCASE.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM fill_missing_v439a_texts - deutsche Texte als Fallback laden
+*&---------------------------------------------------------------------*
+FORM fill_missing_v439a_texts CHANGING ct_v439a TYPE tt_v439a.
+
+  TYPES: BEGIN OF ty_t439t_text,
+           disls TYPE t439t-disls,
+           loslt TYPE t439t-loslt,
+         END OF ty_t439t_text,
+         tt_t439t_text TYPE STANDARD TABLE OF ty_t439t_text WITH DEFAULT KEY.
+
+  DATA lt_text_d TYPE tt_t439t_text.
+
+  IF ct_v439a IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT disls, loslt
+    FROM t439t
+    INTO CORRESPONDING FIELDS OF TABLE @lt_text_d
+    WHERE spras = 'D'.
+  SORT lt_text_d BY disls.
+
+  LOOP AT ct_v439a ASSIGNING FIELD-SYMBOL(<ls_v439a_fill>)
+       WHERE loslt IS INITIAL.
+    READ TABLE lt_text_d ASSIGNING FIELD-SYMBOL(<ls_text_d>)
+      WITH KEY disls = <ls_v439a_fill>-disls
+      BINARY SEARCH.
+    IF sy-subrc = 0.
+      <ls_v439a_fill>-loslt = <ls_text_d>-loslt.
+    ENDIF.
+  ENDLOOP.
 
 ENDFORM.
 
@@ -2229,8 +2426,15 @@ CLASS ltcl_storno_movements DEFINITION FINAL FOR TESTING
   RISK LEVEL HARMLESS.
   PRIVATE SECTION.
     METHODS build_refs_deduplicates FOR TESTING.
-    METHODS detects_complete_reference FOR TESTING.
+    METHODS filter_keeps_only_real_stornos FOR TESTING.
     METHODS merge_deduplicates_items FOR TESTING.
+ENDCLASS.
+
+CLASS ltcl_row_limit DEFINITION FINAL FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+  PRIVATE SECTION.
+    METHODS build_mard_count_index_counts FOR TESTING.
 ENDCLASS.
 
 CLASS ltcl_dismm_filter DEFINITION FINAL FOR TESTING
@@ -2283,29 +2487,57 @@ CLASS ltcl_storno_movements IMPLEMENTATION.
       msg = 'Der erste Originalbeleg muss als Storno-Referenz vorhanden sein.' ).
   ENDMETHOD.
 
-  METHOD detects_complete_reference.
-    DATA lv_has_reference TYPE abap_bool.
-    DATA ls_mov           TYPE ty_mov.
+  METHOD filter_keeps_only_real_stornos.
+    DATA lt_ref TYPE tt_mov_ref.
+    DATA lt_storno_mov TYPE tt_mov.
 
-    ls_mov-sjahr = '2024'.
-    ls_mov-smbln = '4900000001'.
-    ls_mov-smblp = '0001'.
-    PERFORM has_storno_reference
-      USING ls_mov
-      CHANGING lv_has_reference.
-    cl_abap_unit_assert=>assert_true(
-      act = lv_has_reference
-      msg = 'Vollstaendig gefuellte SJAHR/SMBLN/SMBLP muessen erkannt werden.' ).
+    INSERT VALUE ty_mov_ref( mjahr = '2024'
+                             mblnr = '4900000001'
+                             zeile = '0001' ) INTO TABLE lt_ref.
 
-    CLEAR ls_mov.
-    ls_mov-sjahr = '2024'.
-    ls_mov-smbln = '4900000001'.
-    PERFORM has_storno_reference
-      USING ls_mov
-      CHANGING lv_has_reference.
-    cl_abap_unit_assert=>assert_false(
-      act = lv_has_reference
-      msg = 'Unvollstaendige Stornoreferenzen duerfen nicht als echt gelten.' ).
+    APPEND VALUE ty_mov( matnr = 'MAT-001'
+                         werks = '1000'
+                         bwart = '202'
+                         mjahr = '2024'
+                         mblnr = '4900000002'
+                         zeile = '0001'
+                         sjahr = '2024'
+                         smbln = '4900000001'
+                         smblp = '0001' ) TO lt_storno_mov.
+    APPEND VALUE ty_mov( matnr = 'MAT-001'
+                         werks = '1000'
+                         bwart = '202'
+                         mjahr = '2024'
+                         mblnr = '4900000003'
+                         zeile = '0001' ) TO lt_storno_mov.
+    APPEND VALUE ty_mov( matnr = 'MAT-001'
+                         werks = '1000'
+                         bwart = '202'
+                         mjahr = '2024'
+                         mblnr = '4900000004'
+                         zeile = '0001'
+                         sjahr = '2024'
+                         smbln = '4900000099'
+                         smblp = '0001' ) TO lt_storno_mov.
+
+    PERFORM filter_real_storno_movements
+      USING lt_ref
+      CHANGING lt_storno_mov.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = 1
+      act = lines( lt_storno_mov )
+      msg = 'Nur echte Stornos mit Referenz auf exportierte Originalbelege duerfen bleiben.' ).
+
+    READ TABLE lt_storno_mov ASSIGNING FIELD-SYMBOL(<ls_storno_left>) INDEX 1.
+    cl_abap_unit_assert=>assert_equals(
+      exp = 0
+      act = sy-subrc
+      msg = 'Eine gefilterte Stornozeile muss lesbar sein.' ).
+    cl_abap_unit_assert=>assert_equals(
+      exp = '4900000002'
+      act = <ls_storno_left>-mblnr
+      msg = 'Die Stornozeile mit passender SJAHR/SMBLN/SMBLP-Referenz muss bleiben.' ).
   ENDMETHOD.
 
   METHOD merge_deduplicates_items.
@@ -2352,6 +2584,64 @@ CLASS ltcl_storno_movements IMPLEMENTATION.
       exp = 0
       act = sy-subrc
       msg = 'Die zusaetzliche Storno-Belegzeile muss im Ergebnis bleiben.' ).
+  ENDMETHOD.
+
+ENDCLASS.
+
+CLASS ltcl_row_limit IMPLEMENTATION.
+
+  METHOD build_mard_count_index_counts.
+    DATA lt_mard TYPE tt_mard.
+    DATA lt_count TYPE tt_key_count.
+
+    APPEND VALUE ty_mard( matnr = 'MAT-001'
+                          werks = '1000'
+                          lgort = '0001' ) TO lt_mard.
+    APPEND VALUE ty_mard( matnr = 'MAT-001'
+                          werks = '1000'
+                          lgort = '0002' ) TO lt_mard.
+    APPEND VALUE ty_mard( matnr = 'MAT-001'
+                          werks = '1000'
+                          lgort = '0003' ) TO lt_mard.
+    APPEND VALUE ty_mard( matnr = 'MAT-002'
+                          werks = '1000'
+                          lgort = '0001' ) TO lt_mard.
+
+    PERFORM build_mard_count_index
+      USING lt_mard
+      CHANGING lt_count.
+
+    READ TABLE lt_count ASSIGNING FIELD-SYMBOL(<ls_count>)
+      WITH TABLE KEY matnr = 'MAT-001'
+                     werks = '1000'.
+    cl_abap_unit_assert=>assert_equals(
+      exp = 0
+      act = sy-subrc
+      msg = 'MAT-001/1000 muss im Count-Index vorhanden sein.' ).
+    cl_abap_unit_assert=>assert_equals(
+      exp = 3
+      act = <ls_count>-rows
+      msg = 'MAT-001/1000 muss drei MARD-Zeilen zaehlen.' ).
+
+    READ TABLE lt_count ASSIGNING <ls_count>
+      WITH TABLE KEY matnr = 'MAT-002'
+                     werks = '1000'.
+    cl_abap_unit_assert=>assert_equals(
+      exp = 0
+      act = sy-subrc
+      msg = 'MAT-002/1000 muss im Count-Index vorhanden sein.' ).
+    cl_abap_unit_assert=>assert_equals(
+      exp = 1
+      act = <ls_count>-rows
+      msg = 'MAT-002/1000 muss eine MARD-Zeile zaehlen.' ).
+
+    READ TABLE lt_count TRANSPORTING NO FIELDS
+      WITH TABLE KEY matnr = 'MAT-003'
+                     werks = '1000'.
+    cl_abap_unit_assert=>assert_equals(
+      exp = 4
+      act = sy-subrc
+      msg = 'Nicht enthaltenes Material darf keinen Count-Eintrag erzeugen.' ).
   ENDMETHOD.
 
 ENDCLASS.
