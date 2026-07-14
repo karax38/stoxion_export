@@ -11,10 +11,11 @@
 *&           ab Zeile 3 = Daten
 *&
 *& Reiter   : T001, T001W, T006, T134, V438A, V439A, V_399D_E,
-*&            MARA, MATDOC, MARC, MBEW, MDMA, MDLV
+*&            MARA, MATDOC, MARC, MBEW, MARD, MDMA, MDLV
 *&
 *& Quellen  : Material- und Werksstammdaten aus MARA/MARC/MBEW,
-*&           Bewegungen aus MSEG/MKPF, Dispobereiche aus MDMA/MDLV
+*&           Lagerortbestaende aus MARD, Bewegungen aus MSEG/MKPF,
+*&           Dispobereiche aus MDMA/MDLV
 *&           sowie die benoetigten Organisations- und Customizingtabellen.
 *&
 *& Dispobereiche:
@@ -195,6 +196,16 @@ TYPES: BEGIN OF ty_plant,
          lbkum TYPE mbew-lbkum,
          lvorm TYPE mbew-lvorm,
        END OF ty_mbew,
+       BEGIN OF ty_mard,
+         matnr TYPE mard-matnr,
+         werks TYPE mard-werks,
+         lgort TYPE mard-lgort,
+         labst TYPE mard-labst,
+         insme TYPE mard-insme,
+         speme TYPE mard-speme,
+         einme TYPE mard-einme,
+         lvorm TYPE mard-lvorm,
+       END OF ty_mard,
        BEGIN OF ty_t006,
          msehi TYPE t006-msehi,
          decan TYPE t006-decan,
@@ -227,6 +238,7 @@ TYPES: BEGIN OF ty_plant,
        tt_mdma_std TYPE STANDARD TABLE OF ty_mdma WITH DEFAULT KEY,
        tt_mdlv  TYPE STANDARD TABLE OF ty_mdlv  WITH DEFAULT KEY,
        tt_mbew  TYPE STANDARD TABLE OF ty_mbew  WITH DEFAULT KEY,
+       tt_mard  TYPE STANDARD TABLE OF ty_mard  WITH DEFAULT KEY,
        tt_t006  TYPE STANDARD TABLE OF ty_t006  WITH DEFAULT KEY,
        tt_t134  TYPE STANDARD TABLE OF ty_t134  WITH DEFAULT KEY,
        tt_t438a TYPE STANDARD TABLE OF ty_t438a WITH DEFAULT KEY,
@@ -504,7 +516,18 @@ START-OF-SELECTION.
   SORT lt_mbew BY matnr bwkey.
   DELETE ADJACENT DUPLICATES FROM lt_mbew COMPARING matnr bwkey.
 
-* --- 6) Customizing-/Konfig-Tabellen ----------------------------------
+* --- 6) MARD (je Material + Werk + Lagerort) --------------------------
+  DATA lt_mard TYPE tt_mard.
+  SELECT matnr, werks, lgort, labst, insme, speme, einme, lvorm
+    FROM mard
+    INTO CORRESPONDING FIELDS OF TABLE @lt_mard
+    FOR ALL ENTRIES IN @gt_marc
+    WHERE matnr = @gt_marc-matnr
+      AND werks = @gt_marc-werks.
+  SORT lt_mard BY matnr werks lgort.
+  DELETE ADJACENT DUPLICATES FROM lt_mard COMPARING matnr werks lgort.
+
+* --- 7) Customizing-/Konfig-Tabellen ----------------------------------
   DATA: lt_t006  TYPE tt_t006,
         lt_t134  TYPE tt_t134,
         lt_t438a TYPE tt_t438a,
@@ -528,11 +551,14 @@ START-OF-SELECTION.
   SORT lt_t399d BY werks.
 
 *----------------------------------------------------------------------*
-* 7) Arbeitsmappen erzeugen
+* 8) Arbeitsmappen erzeugen
 *----------------------------------------------------------------------*
 * --- MATDOC: Bewegungsdaten paketiert, Aufteilung am Zeilenlimit -------
 * Bewusst inkl. Stornoreferenzen (SJAHR/SMBLN/SMBLP): die Storno-
 * Bereinigung erfolgt in stoxion, daher hier roh exportieren.
+* MARD kann mehrere Lagerorte je Material/Werk liefern, ist aber kein
+* MATDOC-artiger Bulk-Reiter und wird nicht in diese Zeilenlimit-Pruefung
+* einbezogen.
   PERFORM reset_result_writer.
 
   DATA: lt_chunk         TYPE tt_key,
@@ -658,12 +684,13 @@ START-OF-SELECTION.
                                         gt_plants
                                         lt_t006
                                         lt_t134
-                                        lt_t438a
-                                        lt_v439a
-                                        lt_t399d
-                                        lt_mdma
-                                        lt_mdlv
-                                        lt_mbew.
+                                         lt_t438a
+                                         lt_v439a
+                                         lt_t399d
+                                         lt_mdma
+                                         lt_mdlv
+                                         lt_mbew
+                                         lt_mard.
         CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
       ENDIF.
 
@@ -692,12 +719,13 @@ START-OF-SELECTION.
                                     gt_plants
                                     lt_t006
                                     lt_t134
-                                    lt_t438a
-                                    lt_v439a
-                                    lt_t399d
-                                    lt_mdma
-                                    lt_mdlv
-                                    lt_mbew.
+                                     lt_t438a
+                                     lt_v439a
+                                     lt_t399d
+                                     lt_mdma
+                                     lt_mdlv
+                                     lt_mbew
+                                     lt_mard.
     CLEAR: lt_book_marc, lt_book_mov, lv_book_mov_rows.
   ENDIF.
   CLEAR: lt_chunk, lt_mov, lt_mov_index.
@@ -1092,13 +1120,15 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
                              it_t399d     TYPE tt_t399d
                              it_mdma_all  TYPE tt_mdma
                              it_mdlv_all  TYPE tt_mdlv
-                             it_mbew_all  TYPE tt_mbew.
+                             it_mbew_all  TYPE tt_mbew
+                             it_mard_all  TYPE tt_mard.
 
   DATA: lt_book_plants TYPE tt_plant,
         lt_book_mara   TYPE tt_mara,
         lt_book_mdma   TYPE tt_mdma_std,
         lt_book_mdlv   TYPE tt_mdlv,
         lt_book_mbew   TYPE tt_mbew,
+        lt_book_mard   TYPE tt_mard,
         lv_xlsx        TYPE xstring.
 
   CLEAR gt_sheets.
@@ -1154,6 +1184,16 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
   SORT lt_book_mbew BY matnr bwkey.
   DELETE ADJACENT DUPLICATES FROM lt_book_mbew COMPARING matnr bwkey.
 
+  LOOP AT it_book_marc ASSIGNING <ls_book_marc>.
+    LOOP AT it_mard_all ASSIGNING FIELD-SYMBOL(<ls_book_mard_all>)
+         WHERE matnr = <ls_book_marc>-matnr
+           AND werks = <ls_book_marc>-werks.
+      APPEND <ls_book_mard_all> TO lt_book_mard.
+    ENDLOOP.
+  ENDLOOP.
+  SORT lt_book_mard BY matnr werks lgort.
+  DELETE ADJACENT DUPLICATES FROM lt_book_mard COMPARING matnr werks lgort.
+
   PERFORM build_common_sheets USING lt_book_plants
                                     it_t006
                                     it_t134
@@ -1161,8 +1201,9 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
                                     it_v439a
                                     it_t399d.
   PERFORM build_master_sheets USING it_book_marc
-                                    lt_book_mara
-                                    lt_book_mbew.
+                                     lt_book_mara
+                                     lt_book_mbew
+                                     lt_book_mard.
   PERFORM build_mrp_area_sheets USING lt_book_mdma
                                       lt_book_mdlv.
   PERFORM build_matdoc_sheet USING it_book_mov.
@@ -1270,11 +1311,12 @@ FORM build_common_sheets USING it_plants TYPE tt_plant
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM build_master_sheets - MARA/MARC/MBEW fuer das Paket
+*& FORM build_master_sheets - MARA/MARC/MBEW/MARD fuer das Paket
 *&---------------------------------------------------------------------*
 FORM build_master_sheets USING it_marc TYPE tt_marc
                                it_mara TYPE tt_mara
-                               it_mbew TYPE tt_mbew.
+                               it_mbew TYPE tt_mbew
+                               it_mard TYPE tt_mard.
 
   DATA lv_matnr_out TYPE string.
 
@@ -1344,6 +1386,25 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
            |{ <ls_mbew>-lvorm }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MBEW' gt_lines.
+
+* --- MARD ---
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Werk{ gc_tab }Lagerort{ gc_tab }| &&
+         |Frei verwendbarer Bestand{ gc_tab }Qualitaetspruefbestand{ gc_tab }| &&
+         |Gesperrter Bestand{ gc_tab }Bestand in Retoure{ gc_tab }Loeschvormerkung| TO gt_lines.
+  APPEND |MATNR{ gc_tab }WERKS{ gc_tab }LGORT{ gc_tab }LABST{ gc_tab }| &&
+         |INSME{ gc_tab }SPEME{ gc_tab }EINME{ gc_tab }LVORM| TO gt_lines.
+  LOOP AT it_mard ASSIGNING FIELD-SYMBOL(<ls_mard>).
+    PERFORM matnr_out USING <ls_mard>-matnr CHANGING lv_matnr_out.
+    APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_mard>-werks }{ gc_tab }| &&
+           |{ <ls_mard>-lgort }{ gc_tab }| &&
+           |{ <ls_mard>-labst NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mard>-insme NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mard>-speme NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mard>-einme NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mard>-lvorm }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'MARD' gt_lines.
 
 ENDFORM.
 
@@ -1685,6 +1746,7 @@ FORM reorder_sheets_like_template.
   PERFORM append_ordered_sheet USING 'MATDOC'   CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MARC'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MBEW'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'MARD'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MDMA'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MDLV'     CHANGING lt_ordered.
 
