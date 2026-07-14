@@ -114,6 +114,9 @@ TYPES: BEGIN OF ty_plant,
          bstma TYPE marc-bstma,
          bstrf TYPE marc-bstrf,
          mabst TYPE marc-mabst,
+         minbe TYPE marc-minbe,
+         shflg TYPE marc-shflg,
+         shzet TYPE marc-shzet,
          mtart TYPE mara-mtart,
          meins TYPE mara-meins,
        END OF ty_marc,
@@ -152,6 +155,13 @@ TYPES: BEGIN OF ty_plant,
          plifzx TYPE mdma-plifzx,
          pstat TYPE mdma-pstat,
          loekz TYPE mdma-loekz,
+         minbe TYPE mdma-minbe,
+         disls TYPE mdma-disls,
+         bstfe TYPE mdma-bstfe,
+         bstmi TYPE mdma-bstmi,
+         bstma TYPE mdma-bstma,
+         bstrf TYPE mdma-bstrf,
+         mabst TYPE mdma-mabst,
        END OF ty_mdma,
        ty_berid TYPE c LENGTH 10,
        BEGIN OF ty_mdlv,
@@ -184,6 +194,13 @@ TYPES: BEGIN OF ty_plant,
          dismm TYPE t438a-dismm,
          disvf TYPE t438a-disvf,
        END OF ty_t438a,
+       BEGIN OF ty_v439a,
+         disls TYPE v439a-disls,
+         losvf TYPE v439a-losvf,
+         loskz TYPE v439a-loskz,
+         peraz TYPE v439a-peraz,
+         loslt TYPE v439a-loslt,
+       END OF ty_v439a,
        BEGIN OF ty_t399d,
          werks TYPE t399d-werks,
          bztek TYPE t399d-bztek,
@@ -201,6 +218,7 @@ TYPES: BEGIN OF ty_plant,
        tt_t006  TYPE STANDARD TABLE OF ty_t006  WITH DEFAULT KEY,
        tt_t134  TYPE STANDARD TABLE OF ty_t134  WITH DEFAULT KEY,
        tt_t438a TYPE STANDARD TABLE OF ty_t438a WITH DEFAULT KEY,
+       tt_v439a TYPE STANDARD TABLE OF ty_v439a WITH DEFAULT KEY,
        tt_t399d TYPE STANDARD TABLE OF ty_t399d WITH DEFAULT KEY,
        tt_dismm_range TYPE RANGE OF marc-dismm,
        tt_string TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
@@ -383,6 +401,7 @@ START-OF-SELECTION.
   SELECT c~matnr, c~werks, c~lvorm, c~dismm, c~eisbe, c~plifz,
          c~webaz, c~pstat, c~maabc, c~wzeit,
          c~disls, c~bstfe, c~bstmi, c~bstma, c~bstrf, c~mabst,
+         c~minbe, c~shflg, c~shzet,
          a~mtart, a~meins
     FROM marc AS c
     INNER JOIN mara AS a ON a~matnr = c~matnr
@@ -410,7 +429,8 @@ START-OF-SELECTION.
 
 * --- 2) Dispobereiche (MDMA, je Material/Werk) kennzeichnen -----------
   DATA lt_mdma TYPE tt_mdma.
-  SELECT matnr, berid, werks, dismm, eisbe, plifz, plifzx, pstat, loekz
+  SELECT matnr, berid, werks, dismm, eisbe, plifz, plifzx, pstat, loekz,
+         minbe, disls, bstfe, bstmi, bstma, bstrf, mabst
     FROM mdma
     INTO CORRESPONDING FIELDS OF TABLE @lt_mdma
     FOR ALL ENTRIES IN @gt_marc
@@ -494,6 +514,7 @@ START-OF-SELECTION.
   DATA: lt_t006  TYPE tt_t006,
         lt_t134  TYPE tt_t134,
         lt_t438a TYPE tt_t438a,
+        lt_v439a TYPE tt_v439a,
         lt_t399d TYPE tt_t399d,
         lt_mdlv  TYPE tt_mdlv.
 
@@ -503,6 +524,8 @@ START-OF-SELECTION.
     INTO CORRESPONDING FIELDS OF TABLE @lt_t134.
   SELECT dismm, disvf FROM t438a
     INTO CORRESPONDING FIELDS OF TABLE @lt_t438a.
+  SELECT disls, losvf, loskz, peraz, loslt FROM v439a
+    INTO CORRESPONDING FIELDS OF TABLE @lt_v439a.
   SELECT werks, bztek FROM t399d
     INTO CORRESPONDING FIELDS OF TABLE @lt_t399d
     WHERE werks IN @s_werks.
@@ -651,6 +674,7 @@ START-OF-SELECTION.
                                         lt_t006
                                         lt_t134
                                         lt_t438a
+                                        lt_v439a
                                         lt_t399d
                                         lt_mdma
                                         lt_mdlv
@@ -684,6 +708,7 @@ START-OF-SELECTION.
                                     lt_t006
                                     lt_t134
                                     lt_t438a
+                                    lt_v439a
                                     lt_t399d
                                     lt_mdma
                                     lt_mdlv
@@ -1008,6 +1033,7 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
                              it_t006      TYPE tt_t006
                              it_t134      TYPE tt_t134
                              it_t438a     TYPE tt_t438a
+                             it_v439a     TYPE tt_v439a
                              it_t399d     TYPE tt_t399d
                              it_mdma_all  TYPE tt_mdma
                              it_mdlv_all  TYPE tt_mdlv
@@ -1077,6 +1103,7 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
                                     it_t006
                                     it_t134
                                     it_t438a
+                                    it_v439a
                                     it_t399d.
   PERFORM build_master_sheets USING it_book_marc
                                     lt_book_mara
@@ -1099,6 +1126,7 @@ FORM build_common_sheets USING it_plants TYPE tt_plant
                                it_t006   TYPE tt_t006
                                it_t134   TYPE tt_t134
                                it_t438a  TYPE tt_t438a
+                               it_v439a  TYPE tt_v439a
                                it_t399d  TYPE tt_t399d.
 
 * --- T001 (eindeutige Buchungskreise) ---------------------------------
@@ -1157,6 +1185,19 @@ FORM build_common_sheets USING it_plants TYPE tt_plant
   ENDLOOP.
   PERFORM write_sheet USING 'V438A' gt_lines.
 
+* --- V439A ---
+  CLEAR gt_lines.
+  APPEND |Losgrößenverfahren{ gc_tab }Losgrößenverf. kurzfristig{ gc_tab }| &&
+         |Losgrößenkennzeichen{ gc_tab }Periodenanzahl{ gc_tab }| &&
+         |Name Losgrößenverfahren| TO gt_lines.
+  APPEND |DISLS{ gc_tab }LOSVF{ gc_tab }LOSKZ{ gc_tab }PERAZ{ gc_tab }LOSLT| TO gt_lines.
+  LOOP AT it_v439a ASSIGNING FIELD-SYMBOL(<ls_v439a>).
+    APPEND |{ <ls_v439a>-disls }{ gc_tab }{ <ls_v439a>-losvf }{ gc_tab }| &&
+           |{ <ls_v439a>-loskz }{ gc_tab }{ <ls_v439a>-peraz NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_v439a>-loslt }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'V439A' gt_lines.
+
 * --- V_399D_E (je Werk) ------------------------------------------------
   CLEAR gt_lines.
   APPEND |Werk{ gc_tab }Einkaufsbearbeitungszeit (Werktage)| TO gt_lines.
@@ -1198,11 +1239,12 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
          |Pflegestatus (D/E/L){ gc_tab }ABC-Indikator{ gc_tab }ABC-Quelle{ gc_tab }| &&
          |ABC-Indikator Original{ gc_tab }Wiederbeschaffungszeit (optional){ gc_tab }| &&
          |Dispolosgröße{ gc_tab }Feste Losgröße{ gc_tab }Mindestlosgröße{ gc_tab }| &&
-         |Höchstlosgröße{ gc_tab }Rundungswert{ gc_tab }Höchstbestand| TO gt_lines.
+         |Höchstlosgröße{ gc_tab }Rundungswert{ gc_tab }Höchstbestand{ gc_tab }| &&
+         |Meldebestand{ gc_tab }Bedarfsvorlaufkennzeichen{ gc_tab }Bedarfsvorlaufzeit| TO gt_lines.
   APPEND |MATNR{ gc_tab }WERKS{ gc_tab }DIBER{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
          |PLIFZ{ gc_tab }WEBAZ{ gc_tab }PSTAT{ gc_tab }MAABC{ gc_tab }MAABC_SOURCE{ gc_tab }| &&
          |MAABC_ORIGINAL{ gc_tab }WZEIT{ gc_tab }DISLS{ gc_tab }BSTFE{ gc_tab }BSTMI{ gc_tab }| &&
-         |BSTMA{ gc_tab }BSTRF{ gc_tab }MABST| TO gt_lines.
+         |BSTMA{ gc_tab }BSTRF{ gc_tab }MABST{ gc_tab }MINBE{ gc_tab }SHFLG{ gc_tab }SHZET| TO gt_lines.
   LOOP AT it_marc ASSIGNING FIELD-SYMBOL(<ls_marc>).
     APPEND |{ <ls_marc>-matnr }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
            |{ <ls_marc>-diber }{ gc_tab }{ <ls_marc>-lvorm }{ gc_tab }| &&
@@ -1217,7 +1259,10 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
            |{ <ls_marc>-bstmi NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_marc>-bstma NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_marc>-bstrf NUMBER = RAW }{ gc_tab }| &&
-           |{ <ls_marc>-mabst NUMBER = RAW }| TO gt_lines.
+           |{ <ls_marc>-mabst NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-minbe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_marc>-shflg }{ gc_tab }| &&
+           |{ <ls_marc>-shzet NUMBER = RAW }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MARC' gt_lines.
 
@@ -1254,16 +1299,27 @@ FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma_std
          |Dispositionsmerkmal{ gc_tab }Ist-Sicherheitsbestand{ gc_tab }| &&
          |Planlieferzeit (Kalendertage){ gc_tab }Planlieferzeit beruecksichtigen{ gc_tab }| &&
          |Pflegestatus (D/E/L){ gc_tab }| &&
-         |Loeschvormerkung| TO gt_lines.
+         |Loeschvormerkung{ gc_tab }Meldebestand{ gc_tab }Dispolosgröße{ gc_tab }| &&
+         |Feste Losgröße{ gc_tab }Mindestlosgröße{ gc_tab }Höchstlosgröße{ gc_tab }| &&
+         |Rundungswert{ gc_tab }Höchstbestand| TO gt_lines.
   APPEND |MATNR{ gc_tab }BERID{ gc_tab }WERKS{ gc_tab }DISMM{ gc_tab }| &&
-         |EISBE{ gc_tab }PLIFZ{ gc_tab }PLIFZX{ gc_tab }PSTAT{ gc_tab }LOEKZ| TO gt_lines.
+         |EISBE{ gc_tab }PLIFZ{ gc_tab }PLIFZX{ gc_tab }PSTAT{ gc_tab }LOEKZ{ gc_tab }| &&
+         |MINBE{ gc_tab }DISLS{ gc_tab }BSTFE{ gc_tab }BSTMI{ gc_tab }BSTMA{ gc_tab }| &&
+         |BSTRF{ gc_tab }MABST| TO gt_lines.
   LOOP AT it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma>).
     APPEND |{ <ls_mdma>-matnr }{ gc_tab }{ <ls_mdma>-berid }{ gc_tab }| &&
            |{ <ls_mdma>-werks }{ gc_tab }{ <ls_mdma>-dismm }{ gc_tab }| &&
            |{ <ls_mdma>-eisbe NUMBER = RAW }{ gc_tab }| &&
            |{ <ls_mdma>-plifz NUMBER = RAW }{ gc_tab }{ <ls_mdma>-plifzx }{ gc_tab }| &&
            |{ <ls_mdma>-pstat }{ gc_tab }| &&
-           |{ <ls_mdma>-loekz }| TO gt_lines.
+           |{ <ls_mdma>-loekz }{ gc_tab }| &&
+           |{ <ls_mdma>-minbe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mdma>-disls }{ gc_tab }| &&
+           |{ <ls_mdma>-bstfe NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mdma>-bstmi NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mdma>-bstma NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mdma>-bstrf NUMBER = RAW }{ gc_tab }| &&
+           |{ <ls_mdma>-mabst NUMBER = RAW }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MDMA' gt_lines.
 
@@ -1555,6 +1611,7 @@ FORM reorder_sheets_like_template.
   PERFORM append_ordered_sheet USING 'T006'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'T134'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'V438A'    CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'V439A'    CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'V_399D_E' CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MARA'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MATDOC'   CHANGING lt_ordered.
