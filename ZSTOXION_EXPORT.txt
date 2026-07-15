@@ -10,12 +10,12 @@
 *&           Zeile 2 = technischer Feldname
 *&           ab Zeile 3 = Daten
 *&
-*& Reiter   : T001, T001W, T006, T134, V438A, V439A, V_399D_E,
+*& Reiter   : T001, T001W, T006, T134, V438A, V439A, T439I, V_399D_E,
 *&            MARA, MATDOC, MARC, MBEW, MARD, MDMA, MDLV
 *&
 *& Quellen  : Material- und Werksstammdaten aus MARA/MARC/MBEW,
 *&           Lagerortbestaende aus MARD, Bewegungen aus MSEG/MKPF,
-*&           Dispobereiche aus MDMA/MDLV
+*&           Dispobereiche aus MDMA/MDLV, Planungskalenderperioden aus T439I
 *&           sowie die benoetigten Organisations- und Customizingtabellen.
 *&
 *& Dispobereiche:
@@ -123,6 +123,7 @@ TYPES: BEGIN OF ty_plant,
          maabc_src   TYPE c LENGTH 12,
          wzeit TYPE marc-wzeit,
          disls TYPE marc-disls,
+         mrppp TYPE marc-mrppp,
          bstfe TYPE marc-bstfe,
          bstmi TYPE marc-bstmi,
          bstma TYPE marc-bstma,
@@ -177,6 +178,7 @@ TYPES: BEGIN OF ty_plant,
          loekz TYPE mdma-loekz,
          minbe TYPE mdma-minbe,
          disls TYPE mdma-disls,
+         mrppp TYPE mdma-mrppp,
          bstfe TYPE mdma-bstfe,
          bstmi TYPE mdma-bstmi,
          bstma TYPE mdma-bstma,
@@ -235,6 +237,18 @@ TYPES: BEGIN OF ty_plant,
          werks TYPE t399d-werks,
          bztek TYPE t399d-bztek,
        END OF ty_t399d,
+       BEGIN OF ty_t439i_ref,
+         werks TYPE werks_d,
+         mrppp TYPE marc-mrppp,
+       END OF ty_t439i_ref,
+       BEGIN OF ty_t439i,
+         werks TYPE werks_d,
+         mrppp TYPE marc-mrppp,
+         ppvon TYPE sy-datum,
+         ppbis TYPE sy-datum,
+         pperi TYPE c LENGTH 3,
+         ppfix TYPE c LENGTH 1,
+       END OF ty_t439i,
        BEGIN OF ty_key_count,
          matnr TYPE matnr,
          werks TYPE werks_d,
@@ -258,6 +272,9 @@ TYPES: BEGIN OF ty_plant,
        tt_t438a TYPE STANDARD TABLE OF ty_t438a WITH DEFAULT KEY,
        tt_v439a TYPE STANDARD TABLE OF ty_v439a WITH DEFAULT KEY,
        tt_t399d TYPE STANDARD TABLE OF ty_t399d WITH DEFAULT KEY,
+       tt_t439i_ref TYPE SORTED TABLE OF ty_t439i_ref
+                    WITH UNIQUE KEY werks mrppp,
+       tt_t439i TYPE STANDARD TABLE OF ty_t439i WITH DEFAULT KEY,
        tt_key_count TYPE HASHED TABLE OF ty_key_count
                     WITH UNIQUE KEY matnr werks,
        tt_bwart_range TYPE RANGE OF mseg-bwart,
@@ -414,7 +431,7 @@ START-OF-SELECTION.
 * --- 1) Kandidaten: MARC + MARA mit Stammdatenfiltern -----------------
   SELECT c~matnr, c~werks, c~lvorm, c~dismm, c~eisbe, c~plifz,
          c~webaz, c~pstat, c~maabc, c~wzeit,
-         c~disls, c~bstfe, c~bstmi, c~bstma, c~bstrf, c~mabst,
+         c~disls, c~mrppp, c~bstfe, c~bstmi, c~bstma, c~bstrf, c~mabst,
          c~minbe, c~shflg, c~shzet,
          a~mtart, a~meins
     FROM marc AS c
@@ -449,7 +466,7 @@ START-OF-SELECTION.
   PERFORM load_mdlv CHANGING lt_mdlv.
 
   SELECT matnr, berid, werks, dismm, eisbe, plifz, plifzx, pstat, loekz,
-         minbe, disls, bstfe, bstmi, bstma, bstrf, mabst
+         minbe, disls, mrppp, bstfe, bstmi, bstma, bstrf, mabst
     FROM mdma
     INTO CORRESPONDING FIELDS OF TABLE @lt_mdma
     FOR ALL ENTRIES IN @gt_marc
@@ -1352,6 +1369,202 @@ FORM map_config_deprecation USING iv_raw    TYPE string
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*& FORM build_t439i_sheet - Planungskalenderperioden fuer Exportkalender
+*&---------------------------------------------------------------------*
+FORM build_t439i_sheet USING it_marc TYPE tt_marc
+                             it_mdma TYPE tt_mdma_std.
+
+  DATA: lt_ref   TYPE tt_t439i_ref,
+        lt_t439i TYPE tt_t439i.
+
+  PERFORM collect_t439i_refs
+    USING it_marc
+          it_mdma
+    CHANGING lt_ref.
+  PERFORM load_t439i_periods
+    USING lt_ref
+    CHANGING lt_t439i.
+
+  CLEAR gt_lines.
+  APPEND |Werk{ gc_tab }Planungskalender{ gc_tab }Periodenbeginn{ gc_tab }| &&
+         |Periodenende{ gc_tab }Periode{ gc_tab }Fixierte Periode| TO gt_lines.
+  APPEND |WERKS{ gc_tab }MRPPP{ gc_tab }PPVON{ gc_tab }PPBIS{ gc_tab }PPERI{ gc_tab }PPFIX| TO gt_lines.
+  LOOP AT lt_t439i ASSIGNING FIELD-SYMBOL(<ls_t439i>).
+    APPEND |{ <ls_t439i>-werks }{ gc_tab }{ <ls_t439i>-mrppp }{ gc_tab }| &&
+           |{ <ls_t439i>-ppvon DATE = RAW }{ gc_tab }| &&
+           |{ <ls_t439i>-ppbis DATE = RAW }{ gc_tab }| &&
+           |{ <ls_t439i>-pperi }{ gc_tab }{ <ls_t439i>-ppfix }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'T439I' gt_lines.
+
+  PERFORM log_missing_t439i_refs
+    USING lt_ref
+          lt_t439i.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM collect_t439i_refs - genutzte Werk/Planungskalender ermitteln
+*&---------------------------------------------------------------------*
+FORM collect_t439i_refs USING it_marc TYPE tt_marc
+                              it_mdma TYPE tt_mdma_std
+                        CHANGING ct_ref TYPE tt_t439i_ref.
+
+  CLEAR ct_ref.
+
+  LOOP AT it_marc ASSIGNING FIELD-SYMBOL(<ls_marc_ref>)
+       WHERE mrppp IS NOT INITIAL.
+    INSERT VALUE ty_t439i_ref(
+      werks = <ls_marc_ref>-werks
+      mrppp = <ls_marc_ref>-mrppp ) INTO TABLE ct_ref.
+  ENDLOOP.
+
+  LOOP AT it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma_ref>)
+       WHERE mrppp IS NOT INITIAL.
+    INSERT VALUE ty_t439i_ref(
+      werks = <ls_mdma_ref>-werks
+      mrppp = <ls_mdma_ref>-mrppp ) INTO TABLE ct_ref.
+  ENDLOOP.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM load_t439i_periods - T439I als transparente Periodenquelle lesen
+*&---------------------------------------------------------------------*
+FORM load_t439i_periods USING it_ref TYPE tt_t439i_ref
+                        CHANGING ct_t439i TYPE tt_t439i.
+
+  DATA: lr_struct_descr TYPE REF TO cl_abap_structdescr,
+        lr_type_descr   TYPE REF TO cl_abap_typedescr,
+        lr_table_descr  TYPE REF TO cl_abap_tabledescr,
+        lr_data         TYPE REF TO data,
+        lv_tabname      TYPE string VALUE 'T439I',
+        ls_t439i        TYPE ty_t439i.
+
+  FIELD-SYMBOLS: <lt_raw> TYPE STANDARD TABLE,
+                 <ls_raw> TYPE any,
+                 <lv_any> TYPE any.
+
+  CLEAR ct_t439i.
+  IF it_ref IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " Tatsaechlich verwendete Quelle: T439I. Im Zielsystem per SE11 als
+  " transparente Periodentabelle mit WERKS/MRPPP/PPVON/PPBIS/PPERI/PPFIX
+  " verifizieren; der Export liest alle definierten Perioden der
+  " referenzierten Planungskalender direkt aus T439I. PPERI/PPFIX werden
+  " nur gefuellt, wenn die Komponenten in diesem Release vorhanden sind.
+  TRY.
+      lr_type_descr = cl_abap_typedescr=>describe_by_name( 'T439I' ).
+      lr_struct_descr ?= lr_type_descr.
+      lr_table_descr = cl_abap_tabledescr=>create(
+                         p_line_type = lr_struct_descr ).
+      CREATE DATA lr_data TYPE HANDLE lr_table_descr.
+      ASSIGN lr_data->* TO <lt_raw>.
+      IF <lt_raw> IS NOT ASSIGNED.
+        MESSAGE 'T439I-Datentabelle konnte nicht zugewiesen werden.'
+          TYPE 'S' DISPLAY LIKE 'W'.
+        RETURN.
+      ENDIF.
+
+      SELECT *
+        FROM (lv_tabname)
+        INTO TABLE @<lt_raw>
+        FOR ALL ENTRIES IN @it_ref
+        WHERE werks = @it_ref-werks
+          AND mrppp = @it_ref-mrppp.
+    CATCH cx_root INTO DATA(lx_t439i).
+      MESSAGE |T439I konnte nicht gelesen werden: { lx_t439i->get_text( ) }|
+        TYPE 'S' DISPLAY LIKE 'W'.
+      RETURN.
+  ENDTRY.
+
+  LOOP AT <lt_raw> ASSIGNING <ls_raw>.
+    CLEAR ls_t439i.
+
+    ASSIGN COMPONENT 'WERKS' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc <> 0.
+      CONTINUE.
+    ENDIF.
+    ls_t439i-werks = <lv_any>.
+
+    ASSIGN COMPONENT 'MRPPP' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc <> 0.
+      CONTINUE.
+    ENDIF.
+    ls_t439i-mrppp = <lv_any>.
+
+    ASSIGN COMPONENT 'PPVON' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc <> 0.
+      CONTINUE.
+    ENDIF.
+    ls_t439i-ppvon = <lv_any>.
+
+    ASSIGN COMPONENT 'PPBIS' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc <> 0.
+      CONTINUE.
+    ENDIF.
+    ls_t439i-ppbis = <lv_any>.
+
+    ASSIGN COMPONENT 'PPERI' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc = 0.
+      ls_t439i-pperi = <lv_any>.
+    ENDIF.
+
+    ASSIGN COMPONENT 'PPFIX' OF STRUCTURE <ls_raw> TO <lv_any>.
+    IF sy-subrc = 0.
+      ls_t439i-ppfix = <lv_any>.
+    ENDIF.
+
+    APPEND ls_t439i TO ct_t439i.
+  ENDLOOP.
+
+  DELETE ct_t439i WHERE ppvon IS INITIAL OR ppbis IS INITIAL.
+  SORT ct_t439i BY werks mrppp ppvon ppbis pperi ppfix.
+  DELETE ADJACENT DUPLICATES FROM ct_t439i
+    COMPARING werks mrppp ppvon ppbis pperi ppfix.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM log_missing_t439i_refs - Vollstaendigkeit in Job-Log melden
+*&---------------------------------------------------------------------*
+FORM log_missing_t439i_refs USING it_ref   TYPE tt_t439i_ref
+                                  it_t439i TYPE tt_t439i.
+
+  DATA: lt_delivered TYPE tt_t439i_ref,
+        lv_missing   TYPE i.
+
+  LOOP AT it_t439i ASSIGNING FIELD-SYMBOL(<ls_t439i_delivered>)
+       WHERE mrppp IS NOT INITIAL.
+    INSERT VALUE ty_t439i_ref(
+      werks = <ls_t439i_delivered>-werks
+      mrppp = <ls_t439i_delivered>-mrppp ) INTO TABLE lt_delivered.
+  ENDLOOP.
+
+  LOOP AT it_ref ASSIGNING FIELD-SYMBOL(<ls_ref_check>).
+    READ TABLE lt_delivered TRANSPORTING NO FIELDS
+      WITH TABLE KEY werks = <ls_ref_check>-werks
+                     mrppp = <ls_ref_check>-mrppp.
+    IF sy-subrc <> 0.
+      lv_missing = lv_missing + 1.
+      MESSAGE |T439I-Luecke: referenzierter Planungskalender | &&
+              |{ <ls_ref_check>-werks }/{ <ls_ref_check>-mrppp } | &&
+              |hat keine Periode im T439I-Sheet.|
+        TYPE 'S' DISPLAY LIKE 'W'.
+    ENDIF.
+  ENDLOOP.
+
+  IF lv_missing > 0.
+    MESSAGE |T439I-Vollstaendigkeitspruefung: { lv_missing } | &&
+            |referenzierte(r) Planungskalender ohne exportierte Periode.|
+      TYPE 'S' DISPLAY LIKE 'W'.
+  ENDIF.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *& FORM fill_missing_v439a_texts - deutsche Texte als Fallback laden
 *&---------------------------------------------------------------------*
 FORM fill_missing_v439a_texts CHANGING ct_v439a TYPE tt_v439a.
@@ -1479,6 +1692,8 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
                                     it_t438a
                                     it_v439a
                                     it_t399d.
+  PERFORM build_t439i_sheet USING it_book_marc
+                                  lt_book_mdma.
   PERFORM build_master_sheets USING it_book_marc
                                      lt_book_mara
                                      lt_book_mbew
@@ -1619,11 +1834,13 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
          |ABC-Indikator Original{ gc_tab }Wiederbeschaffungszeit (optional){ gc_tab }| &&
          |Dispolosgröße{ gc_tab }Feste Losgröße{ gc_tab }Mindestlosgröße{ gc_tab }| &&
          |Höchstlosgröße{ gc_tab }Rundungswert{ gc_tab }Höchstbestand{ gc_tab }| &&
-         |Meldebestand{ gc_tab }Bedarfsvorlaufkennzeichen{ gc_tab }Bedarfsvorlaufzeit| TO gt_lines.
+         |Meldebestand{ gc_tab }Bedarfsvorlaufkennzeichen{ gc_tab }Bedarfsvorlaufzeit{ gc_tab }| &&
+         |Planungskalender| TO gt_lines.
   APPEND |MATNR{ gc_tab }WERKS{ gc_tab }DIBER{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
          |PLIFZ{ gc_tab }WEBAZ{ gc_tab }PSTAT{ gc_tab }MAABC{ gc_tab }MAABC_SOURCE{ gc_tab }| &&
          |MAABC_ORIGINAL{ gc_tab }WZEIT{ gc_tab }DISLS{ gc_tab }BSTFE{ gc_tab }BSTMI{ gc_tab }| &&
-          |BSTMA{ gc_tab }BSTRF{ gc_tab }MABST{ gc_tab }MINBE{ gc_tab }SHFLG{ gc_tab }SHZET| TO gt_lines.
+          |BSTMA{ gc_tab }BSTRF{ gc_tab }MABST{ gc_tab }MINBE{ gc_tab }SHFLG{ gc_tab }SHZET{ gc_tab }| &&
+          |MRPPP| TO gt_lines.
   LOOP AT it_marc ASSIGNING FIELD-SYMBOL(<ls_marc>).
     PERFORM matnr_out USING <ls_marc>-matnr CHANGING lv_matnr_out.
     APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
@@ -1642,7 +1859,8 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
            |{ <ls_marc>-mabst }{ gc_tab }| &&
            |{ <ls_marc>-minbe }{ gc_tab }| &&
            |{ <ls_marc>-shflg }{ gc_tab }| &&
-           |{ <ls_marc>-shzet }| TO gt_lines.
+           |{ <ls_marc>-shzet }{ gc_tab }| &&
+           |{ <ls_marc>-mrppp }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MARC' gt_lines.
 
@@ -1703,11 +1921,11 @@ FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma_std
          |Pflegestatus (D/E/L){ gc_tab }| &&
          |Loeschvormerkung{ gc_tab }Meldebestand{ gc_tab }Dispolosgröße{ gc_tab }| &&
          |Feste Losgröße{ gc_tab }Mindestlosgröße{ gc_tab }Höchstlosgröße{ gc_tab }| &&
-         |Rundungswert{ gc_tab }Höchstbestand| TO gt_lines.
+         |Rundungswert{ gc_tab }Höchstbestand{ gc_tab }Planungskalender| TO gt_lines.
   APPEND |MATNR{ gc_tab }BERID{ gc_tab }WERKS{ gc_tab }DISMM{ gc_tab }| &&
          |EISBE{ gc_tab }PLIFZ{ gc_tab }PLIFZX{ gc_tab }PSTAT{ gc_tab }LOEKZ{ gc_tab }| &&
           |MINBE{ gc_tab }DISLS{ gc_tab }BSTFE{ gc_tab }BSTMI{ gc_tab }BSTMA{ gc_tab }| &&
-          |BSTRF{ gc_tab }MABST| TO gt_lines.
+          |BSTRF{ gc_tab }MABST{ gc_tab }MRPPP| TO gt_lines.
   LOOP AT it_mdma ASSIGNING FIELD-SYMBOL(<ls_mdma>).
     PERFORM matnr_out USING <ls_mdma>-matnr CHANGING lv_matnr_out.
     APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_mdma>-berid }{ gc_tab }| &&
@@ -1722,7 +1940,8 @@ FORM build_mrp_area_sheets USING it_mdma TYPE tt_mdma_std
            |{ <ls_mdma>-bstmi }{ gc_tab }| &&
            |{ <ls_mdma>-bstma }{ gc_tab }| &&
            |{ <ls_mdma>-bstrf }{ gc_tab }| &&
-           |{ <ls_mdma>-mabst }| TO gt_lines.
+           |{ <ls_mdma>-mabst }{ gc_tab }| &&
+           |{ <ls_mdma>-mrppp }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MDMA' gt_lines.
 
@@ -2020,6 +2239,7 @@ FORM reorder_sheets_like_template.
   PERFORM append_ordered_sheet USING 'T134'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'V438A'    CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'V439A'    CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'T439I'    CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'V_399D_E' CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MARA'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MATDOC'   CHANGING lt_ordered.
