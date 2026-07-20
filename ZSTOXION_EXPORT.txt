@@ -1,10 +1,10 @@
 *&---------------------------------------------------------------------*
-*& Report  ZSTOXION_EXPORT
+*& Report  ZKX_STOXION_EXPORT
 *&---------------------------------------------------------------------*
 *& Zweck   : Template-konformer SAP-Datenexport fuer die stoxion
 *&           Safety-Stock-Optimierung.
 *&
-*& Ausgabe  : Eine oder mehrere XLSX-Arbeitsmappen mit einem Reiter je
+*& Ausgabe  : Eine oder mehrere XLSX-Arbeitsmappen mit einem Reiter pro
 *&           fachlichem Datenbereich. Jeder Reiter enthaelt zwei Kopfzeilen:
 *&           Zeile 1 = fachliche Spaltenbezeichnung
 *&           Zeile 2 = technischer Feldname
@@ -19,46 +19,44 @@
 *&           sowie die benoetigten Organisations- und Customizingtabellen.
 *&
 *& Dispobereiche:
-*&   - MARC-DIBER kennzeichnet, ob zu MATNR/WERKS MDMA-Eintraege
-*&     vorhanden sind.
-*&   - Der Werksdispobereich wird IMMER ueber MARC geplant
-*&     (DISMM/EISBE/PLIFZ/PSTAT aus MARC), auch bei DIBER=X.
-*&   - MDMA liefert zusaetzlich die untergeordneten Dispobereiche
-*&     (BERTY=2 Lagerort, BERTY=3 Lohnbearbeiter) mit eigenen
-*&     Planungsdaten inkl. LOEKZ.
-*&   - MDLV liefert die gueltigen BERID/WERKS/LGORT-Zuordnungen.
-*&   - MDMA exportiert keine Werksdispobereiche (BERTY=1).
+*&   - MARC-DIBER markiert vorhandene MDMA-Eintraege zu MATNR/WERKS.
+*&   - Der Werksdispobereich bleibt fachlich fuehrend in MARC
+*&     (DISMM/EISBE/PLIFZ/PSTAT), auch wenn DIBER = X ist.
+*&   - MDMA liefert nur untergeordnete Dispobereiche
+*&     (BERTY = 2 Lagerort, BERTY = 3 Lohnbearbeiter) inklusive LOEKZ.
+*&   - MDLV steuert die gueltigen BERID/WERKS/LGORT-Zuordnungen.
+*&   - Werksdispobereiche (BERTY = 1) werden nicht aus MDMA exportiert.
 *&
 *& Bewegungen:
 *&   - MATDOC exportiert ein fest definiertes Bewegungsarten-Set.
 *&   - Stornos werden ueber ein festes Gegenbewegungsarten-Set selektiert
 *&     (202/262/282/544/552/602/634/642/644/646/312/314/316), damit der
 *&     Zugriff ueber den MSEG-Index MATNR/WERKS/BWART laeuft.
-*&   - Aus dieser Vorauswahl bleiben nur Bewegungen mit echter Storno-
-*&     referenz: SJAHR/SMBLN/SMBLP muessen vollstaendig gefuellt sein und
-*&     auf einen exportierten Originalbeleg zeigen. Die Pruefung erfolgt
-*&     im ABAP (filter_real_storno_movements), nicht auf der Datenbank.
+*&   - Nach der Vorauswahl bleiben nur Bewegungen mit echter Storno-
+*&     referenz: SJAHR/SMBLN/SMBLP muessen gefuellt sein und auf einen
+*&     exportierten Originalbeleg zeigen. Die Pruefung erfolgt im ABAP
+*&     (filter_real_storno_movements), nicht auf der Datenbank.
 *&   - Der Storno-Zeitraum reicht vom Fensterbeginn bis zum Exportdatum.
 *&   - Sonderbestandskennzeichen (SOBKZ) werden roh exportiert.
 *&
-*& Format   : Keine Format-/Headerformatierung im Workbook. Alle Zellen
-*&           werden als Text geschrieben, damit IDs und fuehrende Nullen
-*&           unveraendert bleiben. Alle Reiter frieren die ersten zwei
-*&           Zeilen ein und setzen den AutoFilter von Zeile 2 bis zur
-*&           letzten ausgegebenen Spalte und Datenzeile.
+*& Format   : Minimales XLSX ohne Zellformatierung. Alle Werte werden als
+*&           Text geschrieben, damit IDs und fuehrende Nullen erhalten
+*&           bleiben. Jeder Reiter friert die ersten zwei Zeilen ein und
+*&           setzt den AutoFilter von Zeile 2 bis zur letzten ausgegebenen
+*&           Spalte und Datenzeile.
 *&
 *& Betrieb  : Fuer groessere Exporte den Hintergrundjob verwenden und die
-*&           Datei danach vom Applikationsserver abholen. Es werden keine
-*&           personenbezogenen Daten exportiert.
+*&           Datei danach vom Applikationsserver abholen. Der Export
+*&           enthaelt keine personenbezogenen Daten.
 *&---------------------------------------------------------------------*
-REPORT zstoxion_export.
+REPORT zkx_stoxion_export.
 
 TABLES: mara, marc, mkpf, sscrfields.
 
 CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
-           gc_chunk          TYPE i VALUE 250,      "Material/Werk je Bewegungs-Paket
-           gc_excel_max_rows TYPE i VALUE 1048576,  "Excel-Zeilenlimit (Obergrenze P_MAXROW)
-           demand_history_months_max      TYPE i VALUE 36.
+           gc_chunk          TYPE i VALUE 250,      "Material/Werk-Schluessel je Bewegungsselektion
+           gc_excel_max_rows TYPE i VALUE 1048576,  "Excel-Zeilenlimit je Sheet
+           demand_history_months_max      TYPE i VALUE 36. "volle Monate Historie
 
 CONSTANTS: gc_abc_src_marc TYPE c LENGTH 12 VALUE 'MARC',
            gc_abc_src_init TYPE c LENGTH 12 VALUE 'INITIAL'.
@@ -94,11 +92,11 @@ SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_t_tgt.
   " Arbeitsmappe entsteht als String -> XML-String -> xstring -> ZIP.
   " 500k MATDOC-Zeilen mit 14 inlineStr-Zellen erzeugen hohe Speicher-Peaks.
   " Umlagerungs-BWART und SOBKZ erhoehen das MATDOC-Volumen zusaetzlich.
-  PARAMETERS: p_maxrow TYPE i DEFAULT 100000.  "Max. Zeilen je Arbeitsmappe
+  PARAMETERS: p_maxrow TYPE i DEFAULT 200000.  "Max. Zeilen je Arbeitsmappe
 SELECTION-SCREEN END OF BLOCK b4.
 
 *----------------------------------------------------------------------*
-* Globale Typen / Daten
+* Globale Typen und Laufzeitpuffer
 *----------------------------------------------------------------------*
 TYPES: BEGIN OF ty_plant,
          werks TYPE t001w-werks,
@@ -291,13 +289,13 @@ DATA: gt_plants TYPE tt_plant,
       gt_lines  TYPE STANDARD TABLE OF string,
       gt_sheets TYPE tt_sheet.
 
-" Sheet-Writer-Status (XLSX-Reiterpuffer)
+" Status des Sheet-Writers fuer den aktuellen XLSX-Aufbau
 DATA: gv_xlsx_file TYPE string,
       gv_sh_name   TYPE string,
       gv_sh_isopen TYPE abap_bool,
       gt_sh_buffer TYPE STANDARD TABLE OF string.
 
-" Ergebnis-Writer: ein XLSX direkt, mehrere XLSX als ZIP
+" Ergebnis-Writer: Einzel-XLSX direkt, mehrere Frontend-XLSX als ZIP
 DATA: go_result_zip     TYPE REF TO cl_abap_zip,
       gv_workbook_count TYPE i,
       gv_single_xlsx    TYPE xstring,
