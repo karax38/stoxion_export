@@ -88,11 +88,10 @@ SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_t_tgt.
   PARAMETERS: p_front RADIOBUTTON GROUP rb DEFAULT 'X', "Frontend-Download
               p_serv  RADIOBUTTON GROUP rb.             "Applikationsserver
   PARAMETERS: p_path  TYPE string LOWER CASE
-                      DEFAULT 'C:\stoxion\stoxion_export.xlsx'. "Ziel
-  " Arbeitsmappe entsteht als String -> XML-String -> xstring -> ZIP.
-  " 500k MATDOC-Zeilen mit 14 inlineStr-Zellen erzeugen hohe Speicher-Peaks.
-  " Umlagerungs-BWART und SOBKZ erhoehen das MATDOC-Volumen zusaetzlich.
-  PARAMETERS: p_maxrow TYPE i DEFAULT 200000.  "Max. Zeilen je Arbeitsmappe
+                      DEFAULT 'C:\stoxion\stoxion_export.xlsx'. "Zielpfad
+  " XLSX entsteht speicherseitig ueber XML-Strings; grosse MATDOC-Pakete
+  " werden daher vor dem Arbeitsmappenaufbau begrenzt und gesplittet.
+  PARAMETERS: p_maxrow TYPE i DEFAULT 200000.  "Zeilenlimit je Arbeitsmappe
 SELECTION-SCREEN END OF BLOCK b4.
 
 *----------------------------------------------------------------------*
@@ -382,7 +381,7 @@ AT SELECTION-SCREEN.
 START-OF-SELECTION.
 *----------------------------------------------------------------------*
 
-* --- Batch-Schutz: Frontend-Download geht im Hintergrund nicht --------
+* --- Hintergrundlauf: Frontend-Download auf Server-Ausgabe umstellen ---
   IF sy-batch = 'X' AND p_front = 'X'.
     p_front = space.
     p_serv  = 'X'.
@@ -393,7 +392,7 @@ START-OF-SELECTION.
   PERFORM validate_target_path.
   PERFORM validate_max_rows.
 
-* --- 0) Werke aufloesen, Berechtigungen, Org-Daten --------------------
+* --- 0) Werke aufloesen, Berechtigungen und Org-Daten laden ------------
   SELECT werks, bwkey FROM t001w
     INTO CORRESPONDING FIELDS OF TABLE @gt_plants
     WHERE werks IN @s_werks.
@@ -426,7 +425,7 @@ START-OF-SELECTION.
   ENDLOOP.
   SORT gt_plants BY werks.
 
-* --- 1) Kandidaten: MARC + MARA mit Stammdatenfiltern -----------------
+* --- 1) Material/Werk-Kandidaten aus MARC und MARA selektieren ---------
   SELECT c~matnr, c~werks, c~lvorm, c~dismm, c~eisbe, c~plifz,
          c~webaz, c~pstat, c~maabc, c~wzeit,
          c~disls, c~mrppp, c~bstfe, c~bstmi, c~bstma, c~bstrf, c~mabst,
@@ -447,7 +446,7 @@ START-OF-SELECTION.
 
   PERFORM init_effective_abc CHANGING gt_marc.
 
-  " Bewertungskreis je Zeile ergaenzen (fuer MBEW-Zugriff)
+  " Bewertungskreis pro Material/Werk fuer den spaeteren MBEW-Zugriff merken
   LOOP AT gt_marc ASSIGNING FIELD-SYMBOL(<ls_marc>).
     READ TABLE gt_plants ASSIGNING <ls_plant>
       WITH KEY werks = <ls_marc>-werks BINARY SEARCH.
@@ -456,7 +455,7 @@ START-OF-SELECTION.
     ENDIF.
   ENDLOOP.
 
-* --- 2) Dispobereiche (MDMA, je Material/Werk) bereinigen -------------
+* --- 2) Untergeordnete Dispobereiche aus MDMA ermitteln ----------------
   DATA: lt_mdma TYPE tt_mdma,
         lt_mdlv TYPE tt_mdlv,
         lt_mdma_cnt TYPE tt_key_count.
@@ -504,7 +503,7 @@ START-OF-SELECTION.
         CHANGING lv_keep_mrp.
 
       IF lv_keep_mrp = abap_false.
-        CLEAR <ls_marc>-matnr.          "markieren zum Loeschen
+        CLEAR <ls_marc>-matnr.          "Ausschluss vormerken; Sammel-DELETE folgt
       ENDIF.
     ENDLOOP.
     DELETE gt_marc WHERE matnr IS INITIAL.
@@ -514,7 +513,7 @@ START-OF-SELECTION.
     ENDIF.
   ENDIF.
 
-* --- 3) Materialien mit alternativen Mengeneinheiten ausschliessen ----
+* --- 3) Optional Materialien mit alternativen Mengeneinheiten entfernen -
   IF p_fuom = 'X'.
     DATA lt_altuom TYPE SORTED TABLE OF mara-matnr
                          WITH UNIQUE KEY table_line.
@@ -541,11 +540,12 @@ START-OF-SELECTION.
     ENDIF.
   ENDIF.
 
+* --- 4) ABC-Filter auf effektives ABC-Kennzeichen anwenden -------------
   PERFORM apply_maabc_filter CHANGING gt_marc.
 
   SORT gt_marc BY matnr werks.
 
-* --- 5) MBEW (je Material + Bewertungskreis) --------------------------
+* --- 5) Bewertung je Material und Bewertungskreis laden ----------------
   DATA lt_mbew TYPE tt_mbew.
   SELECT matnr, bwkey, vprsv, stprs, verpr, peinh, salk3, lbkum, lvorm
     FROM mbew
@@ -557,7 +557,7 @@ START-OF-SELECTION.
   SORT lt_mbew BY matnr bwkey.
   DELETE ADJACENT DUPLICATES FROM lt_mbew COMPARING matnr bwkey.
 
-* --- 6) MARD (je Material + Werk + Lagerort) --------------------------
+* --- 6) Lagerortbestaende je Material/Werk laden -----------------------
   DATA lt_mard TYPE tt_mard.
   DATA lt_mard_cnt TYPE tt_key_count.
   SELECT matnr, werks, lgort, labst, insme, speme, einme, lvorm
@@ -572,7 +572,7 @@ START-OF-SELECTION.
     USING lt_mard
     CHANGING lt_mard_cnt.
 
-* --- 7) Customizing-/Konfig-Tabellen ----------------------------------
+* --- 7) Customizing- und Konfigurationstabellen laden ------------------
   DATA: lt_t006  TYPE tt_t006,
         lt_t134  TYPE tt_t134,
         lt_t438a TYPE tt_t438a,
@@ -601,13 +601,12 @@ START-OF-SELECTION.
   SORT lt_t399d BY werks.
 
 *----------------------------------------------------------------------*
-* 8) Arbeitsmappen erzeugen
+* 8) Arbeitsmappen paketieren und erzeugen
 *----------------------------------------------------------------------*
-* --- MATDOC: Bewegungsdaten paketiert, Aufteilung am Zeilenlimit -------
-* Bewusst inkl. Stornoreferenzen (SJAHR/SMBLN/SMBLP): die Storno-
-* Bereinigung erfolgt ueber echte Stornoreferenzen gegen exportierte
-* Originalbelege. MATDOC, MARD und MDMA werden gegen das Excel-Zeilenlimit
-* je Arbeitsmappe geprueft.
+* MATDOC wird paketiert gelesen. Stornoreferenzen (SJAHR/SMBLN/SMBLP)
+* bleiben im Datenmodell, damit echte Stornos gegen exportierte
+* Originalbelege validiert werden koennen. MATDOC, MARD und MDMA werden
+* jeweils gegen das Zeilenlimit der Arbeitsmappe geprueft.
   PERFORM reset_result_writer.
 
   DATA: lt_chunk         TYPE tt_key,
@@ -656,7 +655,7 @@ START-OF-SELECTION.
   PERFORM build_fixed_bwart_range CHANGING lt_bwart.
   PERFORM build_storno_bwart_range CHANGING lt_storno_bwart.
 
-  lv_max_data_rows = p_maxrow - 2.               "2 Kopfzeilen je Reiter
+  lv_max_data_rows = p_maxrow - 2.               "zwei Kopfzeilen je Reiter
   lv_from = 1.
 
   WHILE lv_from <= lines( gt_marc ).
@@ -720,7 +719,7 @@ START-OF-SELECTION.
 
     CLEAR: lt_mov_index, ls_mov_index, lv_index_open.
     LOOP AT lt_mov ASSIGNING FIELD-SYMBOL(<ls_mov_indexed>).
-      " sy-tabix sofort sichern: INSERT in lt_mov_index ueberschreibt es
+      " sy-tabix vor INSERT sichern, weil Tabellenoperationen ihn aendern
       lv_mov_tabix = sy-tabix.
       IF lv_index_open = abap_false OR
          ls_mov_index-matnr <> <ls_mov_indexed>-matnr OR
@@ -857,7 +856,7 @@ START-OF-SELECTION.
           |{ gv_workbook_count } Arbeitsmappe(n).| TYPE 'S'.
 
 *&---------------------------------------------------------------------*
-*& FORM build_storno_ref_keys - Originalbelegschluessel deduplizieren
+*& FORM build_storno_ref_keys - exportierte Originalbelegzeilen indizieren
 *&---------------------------------------------------------------------*
 FORM build_storno_ref_keys USING it_mov TYPE tt_mov
                            CHANGING ct_ref TYPE tt_mov_ref.
@@ -879,7 +878,7 @@ FORM build_storno_ref_keys USING it_mov TYPE tt_mov
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM filter_real_storno_movements - nur echte Stornos behalten
+*& FORM filter_real_storno_movements - nur referenzierte Stornos behalten
 *&---------------------------------------------------------------------*
 FORM filter_real_storno_movements USING it_ref TYPE tt_mov_ref
                                   CHANGING ct_storno_mov TYPE tt_mov.
@@ -907,7 +906,7 @@ FORM filter_real_storno_movements USING it_ref TYPE tt_mov_ref
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM append_unique_movements - Bewegungen per Belegzeile deduplizieren
+*& FORM append_unique_movements - Bewegungen per Materialbelegzeile vereinen
 *&---------------------------------------------------------------------*
 FORM append_unique_movements USING it_add_mov TYPE tt_mov
                              CHANGING ct_mov TYPE tt_mov.
@@ -923,7 +922,7 @@ FORM append_unique_movements USING it_add_mov TYPE tt_mov
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM build_fixed_bwart_range - festes Bewegungsarten-Set
+*& FORM build_fixed_bwart_range - fachliches Bewegungsarten-Set
 *&---------------------------------------------------------------------*
 FORM build_fixed_bwart_range CHANGING ct_bwart TYPE tt_bwart_range.
 
@@ -946,7 +945,7 @@ FORM build_fixed_bwart_range CHANGING ct_bwart TYPE tt_bwart_range.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM build_storno_bwart_range - Gegenbewegungsarten-Set
+*& FORM build_storno_bwart_range - Storno-Gegenbewegungsarten
 *&---------------------------------------------------------------------*
 FORM build_storno_bwart_range CHANGING ct_bwart TYPE tt_bwart_range.
 
@@ -1019,7 +1018,7 @@ FORM build_mdma_count_index USING it_mdma TYPE tt_mdma
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM remove_plant_mrp_area_mdma - Werksdispobereiche verwerfen
+*& FORM remove_plant_mrp_area_mdma - Werksdispobereiche aus MDMA entfernen
 *&---------------------------------------------------------------------*
 FORM remove_plant_mrp_area_mdma USING it_mdlv TYPE tt_mdlv
                                 CHANGING ct_mdma TYPE tt_mdma.
@@ -1060,7 +1059,7 @@ FORM remove_plant_mrp_area_mdma USING it_mdlv TYPE tt_mdlv
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM normalize_area_key - Vergleichsschluessel ohne fuehrende Nullen
+*& FORM normalize_area_key - BERID/WERKS fuer Vergleich normalisieren
 *&---------------------------------------------------------------------*
 FORM normalize_area_key USING iv_value TYPE any
                         CHANGING cv_value TYPE string.
@@ -1095,7 +1094,7 @@ FORM matnr_out USING iv_matnr TYPE matnr
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM keep_by_dismm_filter - Material per Dispomerkmal behalten
+*& FORM keep_by_dismm_filter - MARC und MDMA gegen S_DISMM pruefen
 *&---------------------------------------------------------------------*
 FORM keep_by_dismm_filter USING is_marc  TYPE ty_marc
                                 it_mdma  TYPE tt_mdma
@@ -1104,7 +1103,7 @@ FORM keep_by_dismm_filter USING is_marc  TYPE ty_marc
 
   cv_keep = abap_false.
 
-  " Der Werksdispobereich wird immer ueber MARC geplant.
+  " Werksdispobereiche werden fachlich ueber MARC bewertet.
   IF is_marc-dismm IN it_dismm.
     cv_keep = abap_true.
   ELSEIF is_marc-diber = 'X'.
@@ -1171,7 +1170,7 @@ FORM calc_demand_history_window
            cv_start_max       TYPE sy-datum.
 
   cv_window_end = sy-datum.
-  cv_window_end+6(2) = '01'. "laufender Monat bleibt ausgeschlossen
+  cv_window_end+6(2) = '01'. "laufenden Monat ausschliessen
 
   PERFORM subtract_months_from_first_day
     USING cv_window_end demand_history_months_max
@@ -1224,7 +1223,7 @@ FORM subtract_months_from_first_day USING iv_date   TYPE sy-datum
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& Ergebnis-Writer initialisieren
+*& FORM reset_result_writer - Ergebnis- und Sheet-Puffer zuruecksetzen
 *&---------------------------------------------------------------------*
 FORM reset_result_writer.
 
@@ -1349,7 +1348,7 @@ FORM map_config_deprecation USING iv_raw    TYPE string
   CONDENSE lv_raw NO-GAPS.
   TRANSLATE lv_raw TO UPPER CASE.
 
-  " stoxion verwendet fachlich nur Zeilen mit Status Gueltig.
+  " Fuer stoxion sind fachlich nur gueltige Konfigurationszeilen relevant.
   IF lv_raw IS INITIAL.
     cv_text = 'Gültig'.
     RETURN.
@@ -1448,11 +1447,9 @@ FORM load_t439i_periods USING it_ref TYPE tt_t439i_ref
     RETURN.
   ENDIF.
 
-  " Tatsaechlich verwendete Quelle: T439I. Im Zielsystem per SE11 als
-  " transparente Periodentabelle mit WERKS/MRPPP/PPVON/PPBIS/PPERI/PPFIX
-  " verifizieren; der Export liest alle definierten Perioden der
-  " referenzierten Planungskalender direkt aus T439I. PPERI/PPFIX werden
-  " nur gefuellt, wenn die Komponenten in diesem Release vorhanden sind.
+  " T439I ist die transparente Quelle fuer Perioden der referenzierten
+  " Planungskalender. PPERI/PPFIX werden nur gefuellt, wenn die Komponenten
+  " im jeweiligen SAP-Release vorhanden sind.
   TRY.
       lr_type_descr = cl_abap_typedescr=>describe_by_name( 'T439I' ).
       lr_struct_descr ?= lr_type_descr.
@@ -1624,7 +1621,7 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
   CLEAR gt_sheets.
 
   LOOP AT it_book_marc ASSIGNING FIELD-SYMBOL(<ls_book_marc>).
-    " gt_plants ist nach WERKS sortiert (START-OF-SELECTION)
+    " BINARY SEARCH setzt die Sortierung nach WERKS aus START-OF-SELECTION voraus.
     READ TABLE it_plants ASSIGNING FIELD-SYMBOL(<ls_book_plant>)
       WITH KEY werks = <ls_book_marc>-werks BINARY SEARCH.
     IF sy-subrc = 0.
@@ -2000,13 +1997,12 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 *& FORM publish_workbook - Arbeitsmappe puffern, streamen oder zippen
 *&---------------------------------------------------------------------*
-*& Server-Export : Erste Mappe wird gepuffert (Einzeldatei-Fall). Ab
-*&                 der zweiten Mappe wird jede Mappe SOFORT als
-*&                 nummerierte Datei geschrieben -> es liegt immer nur
-*&                 eine Arbeitsmappe gleichzeitig im Speicher, kein
-*&                 Sammel-ZIP.
-*& Frontend       : Wie bisher - ein XLSX direkt, mehrere als ZIP
-*&                 (eine Einzeldatei ist fuer den Download praktischer).
+*& Server-Export : Die erste Mappe bleibt gepuffert, bis klar ist, ob eine
+*&                 Einzeldatei reicht. Ab der zweiten Mappe wird sofort
+*&                 nummeriert geschrieben, damit kein Sammel-ZIP im Speicher
+*&                 gehalten werden muss.
+*& Frontend       : Eine Arbeitsmappe wird direkt als XLSX geschrieben,
+*&                 mehrere Arbeitsmappen werden als ZIP gebuendelt.
 *&---------------------------------------------------------------------*
 FORM publish_workbook USING iv_xlsx TYPE xstring.
 
@@ -2023,7 +2019,7 @@ FORM publish_workbook USING iv_xlsx TYPE xstring.
       gv_single_name = lv_entry_name.
     ELSE.
       IF gv_workbook_count = 2.
-        " Nachholen: gepufferte erste Mappe als _001 schreiben
+        " Erste Mappe nachtraeglich nummeriert schreiben.
         PERFORM server_workbook_path USING 1 CHANGING lv_path.
         PERFORM write_binary_file USING lv_path gv_single_xlsx.
         CLEAR gv_single_xlsx.
@@ -2046,8 +2042,7 @@ FORM publish_workbook USING iv_xlsx TYPE xstring.
     ENDIF.
   ENDIF.
 
-  " Fortschritt ins Job-Log; im Dialog wuerden S-Messages nur die
-  " Abschlussmeldung in der Statuszeile ueberschreiben
+  " Fortschritt nur im Job-Log melden; im Dialog bleibt die Schlussmeldung sichtbar.
   IF sy-batch = 'X'.
     MESSAGE |Arbeitsmappe { gv_workbook_count } erzeugt.| TYPE 'S'.
   ENDIF.
@@ -2070,7 +2065,7 @@ FORM server_workbook_path USING iv_index TYPE i
   DATA: lv_base     TYPE string,
         lv_base_len TYPE i.
 
-  PERFORM build_workbook_filename CHANGING lv_base.  "endet immer auf .xlsx
+  PERFORM build_workbook_filename CHANGING lv_base.  "Basis ist immer eine XLSX-Datei
   lv_base_len = strlen( lv_base ) - 5.
   cv_path = |{ lv_base(lv_base_len) }| &&
             |_{ iv_index WIDTH = 3 ALIGN = RIGHT PAD = '0' }.xlsx|.
@@ -2092,12 +2087,12 @@ FORM write_export_result.
 
   IF p_serv = 'X'.
     IF gv_workbook_count = 1.
-      " Einzelfall: gepufferte Mappe unter dem einfachen Zielnamen
+      " Einzelmappe unter dem unnummerierten Zielnamen schreiben.
       PERFORM build_workbook_filename CHANGING gv_xlsx_file.
       PERFORM write_binary_file USING gv_xlsx_file gv_single_xlsx.
       CLEAR gv_single_xlsx.
     ELSE.
-      " Mappen wurden bereits einzeln geschrieben -> nur Anzeigename
+      " Alle Mappen sind bereits geschrieben; hier nur den Anzeigenamen setzen.
       PERFORM server_workbook_path USING 1 CHANGING gv_xlsx_file.
       PERFORM server_workbook_path USING gv_workbook_count
                                    CHANGING lv_last_file.
@@ -2182,7 +2177,7 @@ FORM write_binary_file USING iv_file    TYPE string
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& Sheet-Writer: Reiter sammeln, am Ende als eine XLSX schreiben
+*& Sheet-Writer: Reiter sammeln und pro Arbeitsmappe als XLSX schreiben
 *&---------------------------------------------------------------------*
 FORM sheet_open USING iv_name TYPE string.
 
@@ -2225,7 +2220,7 @@ FORM write_sheet USING iv_name  TYPE string
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM reorder_sheets_like_template - feste Reiterfolge fuer stoxion
+*& FORM reorder_sheets_like_template - stoxion-Template-Reihenfolge setzen
 *&---------------------------------------------------------------------*
 FORM reorder_sheets_like_template.
 
@@ -2326,8 +2321,7 @@ FORM build_workbook_filename CHANGING cv_file TYPE string.
     RETURN.
   ENDIF.
 
-  " Beide Separatoren pruefen: 'C:/stoxion/' am Frontend soll nicht
-  " zu 'C:/stoxion/\stoxion_export.xlsx' fuehren
+  " Frontend-Pfade koennen beide Separatoren enthalten; nicht doppelt anhaengen.
   DATA(lv_len) = strlen( cv_file ) - 1.
   IF cv_file+lv_len(1) <> '\' AND cv_file+lv_len(1) <> '/'.
     cv_file = cv_file && lv_sep.
@@ -2337,7 +2331,7 @@ FORM build_workbook_filename CHANGING cv_file TYPE string.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*& FORM build_xlsx_zip - minimale OpenXML-Arbeitsmappe bauen
+*& FORM build_xlsx_zip - XLSX als minimales OpenXML-Paket bauen
 *&---------------------------------------------------------------------*
 FORM build_xlsx_zip CHANGING cv_xlsx TYPE xstring.
 
@@ -2553,7 +2547,7 @@ FORM schedule_job.
         lv_jobname  TYPE tbtcjob-jobname,
         lv_jobcount TYPE tbtcjob-jobcount.
 
-  " Aktuelle Selektionswerte einsammeln
+  " Aktuelle Selektionswerte fuer den Job-Submit uebernehmen.
   CALL FUNCTION 'RS_REFRESH_FROM_SELECTOPTIONS'
     EXPORTING
       curr_report     = sy-repid
@@ -2565,7 +2559,7 @@ FORM schedule_job.
     MESSAGE 'Selektionswerte konnten nicht gelesen werden.' TYPE 'E'.
   ENDIF.
 
-  " Im Job zwingend Server-Export
+  " Hintergrundjobs duerfen nicht auf den Frontend-Download zeigen.
   LOOP AT lt_par ASSIGNING FIELD-SYMBOL(<ls_par>).
     CASE <ls_par>-selname.
       WHEN 'P_FRONT'. <ls_par>-low = space.
@@ -2573,14 +2567,14 @@ FORM schedule_job.
     ENDCASE.
   ENDLOOP.
 
-  " Plausibilitaet: Pfad muss ein Server-Pfad sein
+  " Jobausgabe braucht einen Applikationsserverpfad, keinen lokalen Pfad.
   IF p_path CS ':\' OR p_path CS ':/' OR p_path CP '\\*'.
     MESSAGE 'Fuer den Job einen Server-Pfad (AL11) angeben, ' &&
             'z.B. /tmp/stoxion/ - der aktuelle Pfad zeigt auf ein ' &&
             'lokales Laufwerk oder eine Netzwerkfreigabe.' TYPE 'E'.
   ENDIF.
 
-  lv_jobname = |ZSTOXION_{ sy-datum }_{ sy-uzeit }|.
+  lv_jobname = |ZKX_STOXION_{ sy-datum }_{ sy-uzeit }|.
 
   CALL FUNCTION 'JOB_OPEN'
     EXPORTING
@@ -2605,7 +2599,7 @@ FORM schedule_job.
     EXPORTING
       jobname              = lv_jobname
       jobcount             = lv_jobcount
-      strtimmed            = 'X'                "Sofortstart
+      strtimmed            = 'X'                "sofort starten
     EXCEPTIONS
       cant_start_immediate = 1
       invalid_startdate    = 2
