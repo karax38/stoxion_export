@@ -12,6 +12,20 @@
 *&
 *& Reiter   : T001, T001W, T006, T134, V438A, V439A, T439I, V_399D_E,
 *&            MARA, MATDOC, MARC, MBEW, MARD, MDMA, MDLV
+*&            Mit P_SLEXP (Servicelevel-Daten, Standard an) zusaetzlich:
+*&            MBEWH, VBAK, VBAP, VBEP, LIKP, LIPS, VBRK, VBRP, EKKO, EKPO,
+*&            EKET, AUFK, AFKO, AFPO sowie einmalig LAGERKOSTEN und
+*&            FINANZIERUNG (optional).
+*&
+*& Servicelevel: Die zusaetzlichen Reiter speisen den Servicelevel-Replay
+*&           in stoxion (studien/servicelevel_rohdaten.py). MATDOC enthaelt
+*&           dann alle Bewegungsarten (Zugaenge fuer WBZ/Lose,
+*&           Bestandsrueckrechnung, Verschrottung) plus DMBTR und Belegbezug
+*&           (KDAUF/KDPOS, EBELN/EBELP, AUFNR). Lagerkosten: Lieferanten
+*&           externer Laeger (S_LGLIF, Belegarten S_LGBLA) und
+*&           Lagerkostenstellen (S_LGKST). Finanzierung: Zins-, Gebuehren-
+*&           und Kreditkonten (S_ZINSK/S_GEBK/S_KREDK); ohne sie nutzt
+*&           stoxion allein den Bundesbank-Zins. Keine Kundennummern.
 *&
 *& Quellen  : Material- und Werksstammdaten aus MARA/MARC/MBEW,
 *&           Lagerortbestaende aus MARD, Bewegungen aus MSEG/MKPF,
@@ -28,7 +42,8 @@
 *&   - Werksdispobereiche (BERTY = 1) werden nicht aus MDMA exportiert.
 *&
 *& Bewegungen:
-*&   - MATDOC exportiert ein fest definiertes Bewegungsarten-Set.
+*&   - MATDOC exportiert ein fest definiertes Bewegungsarten-Set, mit
+*&     P_SLEXP alle Bewegungsarten (Stornos danach nur mit SMBLN).
 *&   - Stornos werden ueber ein festes Gegenbewegungsarten-Set selektiert
 *&     (202/262/282/544/552/602/634/642/644/646/312/314/316), damit der
 *&     Zugriff ueber den MSEG-Index MATNR/WERKS/BWART laeuft.
@@ -52,6 +67,12 @@
 REPORT zkx_stoxion_export.
 
 TABLES: mara, marc, mkpf, sscrfields.
+
+" Referenztypen fuer Servicelevel-Selektionsoptionen
+DATA: gv_sel_lifnr TYPE lifnr,
+      gv_sel_kostl TYPE kostl,
+      gv_sel_saknr TYPE saknr,
+      gv_sel_blart TYPE blart.
 
 CONSTANTS: gc_tab            TYPE c LENGTH 1 VALUE cl_abap_char_utilities=>horizontal_tab,
            gc_chunk          TYPE i VALUE 250,      "Material/Werk-Schluessel je Bewegungsselektion
@@ -94,6 +115,16 @@ SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE gv_t_tgt.
   PARAMETERS: p_maxrow TYPE i DEFAULT 200000.  "Zeilenlimit je Arbeitsmappe
 SELECTION-SCREEN END OF BLOCK b4.
 
+SELECTION-SCREEN BEGIN OF BLOCK b5 WITH FRAME TITLE gv_t_svl.
+  PARAMETERS: p_slexp AS CHECKBOX DEFAULT 'X'.          "Servicelevel-Daten
+  SELECT-OPTIONS: s_lglif FOR gv_sel_lifnr,              "Lieferanten externer Laeger
+                  s_lgbla FOR gv_sel_blart,              "Rechnungsbelegarten
+                  s_lgkst FOR gv_sel_kostl,              "Lagerkostenstellen
+                  s_zinsk FOR gv_sel_saknr,              "Zinsaufwandskonten
+                  s_gebk  FOR gv_sel_saknr,              "Kreditgebuehrenkonten
+                  s_kredk FOR gv_sel_saknr.              "Verzinsliche Verbindlichkeiten
+SELECTION-SCREEN END OF BLOCK b5.
+
 *----------------------------------------------------------------------*
 * Globale Typen und Laufzeitpuffer
 *----------------------------------------------------------------------*
@@ -131,6 +162,13 @@ TYPES: BEGIN OF ty_plant,
          shzet TYPE marc-shzet,
          mtart TYPE mara-mtart,
          meins TYPE mara-meins,
+         beskz TYPE marc-beskz,
+         sobsl TYPE marc-sobsl,
+         sbdkz TYPE marc-sbdkz,
+         strgr TYPE marc-strgr,
+         dzeit TYPE marc-dzeit,
+         mmsta TYPE marc-mmsta,
+         mstae TYPE mara-mstae,
        END OF ty_marc,
        BEGIN OF ty_mara,
          matnr TYPE mara-matnr,
@@ -157,6 +195,12 @@ TYPES: BEGIN OF ty_plant,
          sjahr TYPE gjahr,
          smbln TYPE mseg-smbln,
          smblp TYPE mseg-smblp,
+         dmbtr TYPE mseg-dmbtr,
+         kdauf TYPE mseg-kdauf,
+         kdpos TYPE mseg-kdpos,
+         ebeln TYPE mseg-ebeln,
+         ebelp TYPE mseg-ebelp,
+         aufnr TYPE mseg-aufnr,
        END OF ty_mov,
        BEGIN OF ty_mov_ref,
          mjahr TYPE mjahr,
@@ -285,6 +329,9 @@ TYPES: BEGIN OF ty_plant,
 
 DATA: gt_plants TYPE tt_plant,
       gt_marc   TYPE tt_marc,
+      gv_hist_start TYPE sy-datum,               "Beginn Nachfragefenster
+      gv_hist_end   TYPE sy-datum,               "Ende (exklusiv)
+      gv_company_sheets_done TYPE abap_bool,
       gt_lines  TYPE STANDARD TABLE OF string,
       gt_sheets TYPE tt_sheet.
 
@@ -311,6 +358,7 @@ INITIALIZATION.
       gv_t_mov = 'Bewegungsdaten'.
       gv_t_flt = 'Filter und Dispobereiche'.
       gv_t_tgt = 'Exportziel'.
+      gv_t_svl = 'Servicelevel-Daten'.
 
       %_s_werks_%_app_%-text = 'Werk(e)'.
       %_s_matnr_%_app_%-text = 'Material'.
@@ -323,6 +371,13 @@ INITIALIZATION.
       %_p_serv_%_app_%-text = 'Applikationsserver'.
       %_p_path_%_app_%-text = 'Zielordner, XLSX- oder ZIP-Datei'.
       %_p_maxrow_%_app_%-text = 'Max. Zeilen je Arbeitsmappe'.
+      %_p_slexp_%_app_%-text = 'Servicelevel-Daten exportieren'.
+      %_s_lglif_%_app_%-text = 'Lieferanten externer Laeger'.
+      %_s_lgbla_%_app_%-text = 'Rechnungsbelegarten'.
+      %_s_lgkst_%_app_%-text = 'Lagerkostenstellen'.
+      %_s_zinsk_%_app_%-text = 'Zinsaufwandskonten'.
+      %_s_gebk_%_app_%-text = 'Kreditgebuehrenkonten'.
+      %_s_kredk_%_app_%-text = 'Verzinsl. Verbindlichkeiten'.
 
     WHEN OTHERS.
       sscrfields-functxt_01 = 'Schedule job'.
@@ -331,6 +386,7 @@ INITIALIZATION.
       gv_t_mov = 'Movement data'.
       gv_t_flt = 'Filters and MRP areas'.
       gv_t_tgt = 'Export target'.
+      gv_t_svl = 'Service level data'.
 
       %_s_werks_%_app_%-text = 'Plant(s)'.
       %_s_matnr_%_app_%-text = 'Material'.
@@ -343,7 +399,23 @@ INITIALIZATION.
       %_p_serv_%_app_%-text = 'Application server'.
       %_p_path_%_app_%-text = 'Target folder, XLSX or ZIP file'.
       %_p_maxrow_%_app_%-text = 'Max rows per workbook'.
+      %_p_slexp_%_app_%-text = 'Export service level data'.
+      %_s_lglif_%_app_%-text = 'External warehouse vendors'.
+      %_s_lgbla_%_app_%-text = 'Invoice document types'.
+      %_s_lgkst_%_app_%-text = 'Warehouse cost centers'.
+      %_s_zinsk_%_app_%-text = 'Interest expense accounts'.
+      %_s_gebk_%_app_%-text = 'Loan fee accounts'.
+      %_s_kredk_%_app_%-text = 'Interest-bearing liabilities'.
   ENDCASE.
+
+  " Standard-Rechnungsbelegarten: Kreditorenrechnung, -gutschrift, MM-Rechnung.
+  IF s_lgbla[] IS INITIAL.
+    s_lgbla-sign = 'I'. s_lgbla-option = 'EQ'.
+    s_lgbla-low = 'KR'. APPEND s_lgbla.
+    s_lgbla-low = 'KG'. APPEND s_lgbla.
+    s_lgbla-low = 'RE'. APPEND s_lgbla.
+    CLEAR s_lgbla.
+  ENDIF.
 
 *----------------------------------------------------------------------*
 AT SELECTION-SCREEN OUTPUT.
@@ -430,7 +502,8 @@ START-OF-SELECTION.
          c~webaz, c~pstat, c~maabc, c~wzeit,
          c~disls, c~mrppp, c~bstfe, c~bstmi, c~bstma, c~bstrf, c~mabst,
          c~minbe, c~shflg, c~shzet,
-         a~mtart, a~meins
+         c~beskz, c~sobsl, c~sbdkz, c~strgr, c~dzeit, c~mmsta,
+         a~mtart, a~meins, a~mstae
     FROM marc AS c
     INNER JOIN mara AS a ON a~matnr = c~matnr
     INTO CORRESPONDING FIELDS OF TABLE @gt_marc
@@ -630,7 +703,8 @@ START-OF-SELECTION.
         lv_book_mov_rows TYPE i,
         lv_book_mard_rows TYPE i,
         lv_book_mdma_rows TYPE i,
-        lv_max_data_rows TYPE i.
+        lv_max_data_rows TYPE i,
+        lv_storno_from   TYPE sy-datum.
 
   TYPES: BEGIN OF ty_mov_index,
            matnr     TYPE matnr,
@@ -652,8 +726,16 @@ START-OF-SELECTION.
   PERFORM set_demand_history_budat
     USING lv_history_start_max
           lv_history_window_end.
-  PERFORM build_fixed_bwart_range CHANGING lt_bwart.
-  PERFORM build_storno_bwart_range CHANGING lt_storno_bwart.
+  PERFORM build_movement_ranges USING p_slexp
+                                CHANGING lt_bwart
+                                         lt_storno_bwart.
+  gv_hist_start = lv_history_start_max.
+  gv_hist_end   = lv_history_window_end.
+  " Mit allen Bewegungsarten liegen Stornos im Fenster schon in der
+  " Hauptselektion; nachgelagert nur Stornos nach Fensterende.
+  lv_storno_from = COND #( WHEN p_slexp = abap_true
+                           THEN lv_history_window_end
+                           ELSE lv_history_start_max ).
 
   lv_max_data_rows = p_maxrow - 2.               "zwei Kopfzeilen je Reiter
   lv_from = 1.
@@ -674,7 +756,8 @@ START-OF-SELECTION.
     CLEAR lt_mov.
     SELECT m~matnr, m~werks, m~lgort, m~bwart, m~sobkz, m~shkzg, m~menge,
            k~budat, m~mjahr, m~mblnr, m~zeile,
-           m~sjahr, m~smbln, m~smblp
+           m~sjahr, m~smbln, m~smblp,
+           m~dmbtr, m~kdauf, m~kdpos, m~ebeln, m~ebelp, m~aufnr
       FROM mseg AS m
       INNER JOIN mkpf AS k
         ON  k~mblnr = m~mblnr
@@ -694,7 +777,8 @@ START-OF-SELECTION.
       CLEAR lt_storno_mov.
       SELECT m~matnr, m~werks, m~lgort, m~bwart, m~sobkz, m~shkzg, m~menge,
              k~budat, m~mjahr, m~mblnr, m~zeile,
-             m~sjahr, m~smbln, m~smblp
+             m~sjahr, m~smbln, m~smblp,
+             m~dmbtr, m~kdauf, m~kdpos, m~ebeln, m~ebelp, m~aufnr
         FROM mseg AS m
         INNER JOIN mkpf AS k
           ON  k~mblnr = m~mblnr
@@ -704,7 +788,8 @@ START-OF-SELECTION.
         WHERE m~matnr =  @lt_chunk-matnr
           AND m~werks =  @lt_chunk-werks
           AND m~bwart IN @lt_storno_bwart
-          AND k~budat >= @lv_history_start_max
+          AND m~smbln <> @space
+          AND k~budat >= @lv_storno_from
           AND k~budat <= @sy-datum.
 
       PERFORM filter_real_storno_movements
@@ -1235,7 +1320,8 @@ FORM reset_result_writer.
          gv_workbook_count,
          gv_single_xlsx,
          gv_single_name,
-         gv_xlsx_file.
+         gv_xlsx_file,
+         gv_company_sheets_done.
 
 ENDFORM.
 
@@ -1696,6 +1782,13 @@ FORM finalize_workbook USING it_book_marc TYPE tt_marc
   PERFORM build_mrp_area_sheets USING lt_book_mdma
                                       lt_book_mdlv.
   PERFORM build_matdoc_sheet USING it_book_mov.
+  IF p_slexp = abap_true.
+    PERFORM build_servicelevel_sheets USING it_book_marc.
+    IF gv_company_sheets_done = abap_false.
+      PERFORM build_company_sheets USING it_plants.
+      gv_company_sheets_done = abap_true.
+    ENDIF.
+  ENDIF.
   PERFORM reorder_sheets_like_template.
   PERFORM build_xlsx_zip CHANGING lv_xlsx.
   PERFORM publish_workbook USING lv_xlsx.
@@ -1729,11 +1822,11 @@ FORM build_common_sheets USING it_plants TYPE tt_plant
 
 * --- T001W (je Werk) ---------------------------------------------------
   CLEAR gt_lines.
-  APPEND |Werk{ gc_tab }Bewertungskreis| TO gt_lines.
-  APPEND |WERKS{ gc_tab }BWKEY|          TO gt_lines.
+  APPEND |Werk{ gc_tab }Bewertungskreis{ gc_tab }Buchungskreis| TO gt_lines.
+  APPEND |WERKS{ gc_tab }BWKEY{ gc_tab }BUKRS|          TO gt_lines.
   LOOP AT it_plants ASSIGNING <ls_plant>.
-    APPEND |{ <ls_plant>-werks }{ gc_tab }{ <ls_plant>-bwkey }|
-      TO gt_lines.
+    APPEND |{ <ls_plant>-werks }{ gc_tab }{ <ls_plant>-bwkey }{ gc_tab }| &&
+           |{ <ls_plant>-bukrs }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'T001W' gt_lines.
 
@@ -1830,12 +1923,15 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
          |Dispolosgröße{ gc_tab }Feste Losgröße{ gc_tab }Mindestlosgröße{ gc_tab }| &&
          |Höchstlosgröße{ gc_tab }Rundungswert{ gc_tab }Höchstbestand{ gc_tab }| &&
          |Meldebestand{ gc_tab }Bedarfsvorlaufkennzeichen{ gc_tab }Bedarfsvorlaufzeit{ gc_tab }| &&
-         |Planungskalender| TO gt_lines.
+         |Planungskalender{ gc_tab }Beschaffungsart{ gc_tab }Sonderbeschaffung{ gc_tab }| &&
+         |Einzel-/Sammelbedarf{ gc_tab }Strategiegruppe{ gc_tab }Eigenfertigungszeit{ gc_tab }| &&
+         |Werksspezifischer Materialstatus{ gc_tab }Werksuebergreifender Materialstatus| TO gt_lines.
   APPEND |MATNR{ gc_tab }WERKS{ gc_tab }DIBER{ gc_tab }LVORM{ gc_tab }DISMM{ gc_tab }EISBE{ gc_tab }| &&
          |PLIFZ{ gc_tab }WEBAZ{ gc_tab }PSTAT{ gc_tab }MAABC{ gc_tab }MAABC_SOURCE{ gc_tab }| &&
          |MAABC_ORIGINAL{ gc_tab }WZEIT{ gc_tab }DISLS{ gc_tab }BSTFE{ gc_tab }BSTMI{ gc_tab }| &&
           |BSTMA{ gc_tab }BSTRF{ gc_tab }MABST{ gc_tab }MINBE{ gc_tab }SHFLG{ gc_tab }SHZET{ gc_tab }| &&
-          |MRPPP| TO gt_lines.
+          |MRPPP{ gc_tab }BESKZ{ gc_tab }SOBSL{ gc_tab }SBDKZ{ gc_tab }STRGR{ gc_tab }DZEIT{ gc_tab }| &&
+          |MMSTA{ gc_tab }MSTAE| TO gt_lines.
   LOOP AT it_marc ASSIGNING FIELD-SYMBOL(<ls_marc>).
     PERFORM matnr_out USING <ls_marc>-matnr CHANGING lv_matnr_out.
     APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_marc>-werks }{ gc_tab }| &&
@@ -1855,7 +1951,11 @@ FORM build_master_sheets USING it_marc TYPE tt_marc
            |{ <ls_marc>-minbe }{ gc_tab }| &&
            |{ <ls_marc>-shflg }{ gc_tab }| &&
            |{ <ls_marc>-shzet }{ gc_tab }| &&
-           |{ <ls_marc>-mrppp }| TO gt_lines.
+           |{ <ls_marc>-mrppp }{ gc_tab }| &&
+           |{ <ls_marc>-beskz }{ gc_tab }{ <ls_marc>-sobsl }{ gc_tab }| &&
+           |{ <ls_marc>-sbdkz }{ gc_tab }{ <ls_marc>-strgr }{ gc_tab }| &&
+           |{ <ls_marc>-dzeit }{ gc_tab }{ <ls_marc>-mmsta }{ gc_tab }| &&
+           |{ <ls_marc>-mstae }| TO gt_lines.
   ENDLOOP.
   PERFORM write_sheet USING 'MARC' gt_lines.
 
@@ -1969,10 +2069,13 @@ FORM build_matdoc_sheet USING it_mov TYPE tt_mov.
          |Sonderbestandskennzeichen{ gc_tab }Soll-/Haben-Kennzeichen{ gc_tab }| &&
          |Menge{ gc_tab }Buchungsdatum{ gc_tab }| &&
          |Materialbelegjahr{ gc_tab }Materialbelegnummer{ gc_tab }Belegzeile{ gc_tab }| &&
-         |Stornojahr{ gc_tab }Stornobeleg{ gc_tab }Stornozeile| TO gt_lines.
+         |Stornojahr{ gc_tab }Stornobeleg{ gc_tab }Stornozeile{ gc_tab }| &&
+         |Betrag Hauswaehrung{ gc_tab }Kundenauftrag{ gc_tab }Kundenauftragsposition{ gc_tab }| &&
+         |Einkaufsbeleg{ gc_tab }Einkaufsbelegposition{ gc_tab }Fertigungsauftrag| TO gt_lines.
   APPEND |MATNR{ gc_tab }WERKS{ gc_tab }LGORT{ gc_tab }BWART{ gc_tab }SOBKZ{ gc_tab }| &&
          |SHKZG{ gc_tab }MENGE{ gc_tab }BUDAT{ gc_tab }MJAHR{ gc_tab }MBLNR{ gc_tab }ZEILE{ gc_tab }| &&
-         |SJAHR{ gc_tab }SMBLN{ gc_tab }SMBLP| TO gt_lines.
+         |SJAHR{ gc_tab }SMBLN{ gc_tab }SMBLP{ gc_tab }DMBTR{ gc_tab }KDAUF{ gc_tab }KDPOS{ gc_tab }| &&
+         |EBELN{ gc_tab }EBELP{ gc_tab }AUFNR| TO gt_lines.
   PERFORM sheet_put USING gt_lines.
 
   CLEAR gt_lines.
@@ -1986,7 +2089,10 @@ FORM build_matdoc_sheet USING it_mov TYPE tt_mov.
            |{ <ls_mov>-budat DATE = RAW }{ gc_tab }| &&
            |{ <ls_mov>-mjahr }{ gc_tab }{ <ls_mov>-mblnr }{ gc_tab }| &&
            |{ <ls_mov>-zeile }{ gc_tab }{ <ls_mov>-sjahr }{ gc_tab }| &&
-           |{ <ls_mov>-smbln }{ gc_tab }{ <ls_mov>-smblp }| TO gt_lines.
+           |{ <ls_mov>-smbln }{ gc_tab }{ <ls_mov>-smblp }{ gc_tab }| &&
+           |{ <ls_mov>-dmbtr }{ gc_tab }{ <ls_mov>-kdauf }{ gc_tab }| &&
+           |{ <ls_mov>-kdpos }{ gc_tab }{ <ls_mov>-ebeln }{ gc_tab }| &&
+           |{ <ls_mov>-ebelp }{ gc_tab }{ <ls_mov>-aufnr }| TO gt_lines.
   ENDLOOP.
   PERFORM sheet_put USING gt_lines.
   CLEAR gt_lines.
@@ -2241,6 +2347,23 @@ FORM reorder_sheets_like_template.
   PERFORM append_ordered_sheet USING 'MARD'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MDMA'     CHANGING lt_ordered.
   PERFORM append_ordered_sheet USING 'MDLV'     CHANGING lt_ordered.
+  " Servicelevel-Reiter (nur mit P_SLEXP)
+  PERFORM append_ordered_sheet USING 'MBEWH'    CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'VBAK'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'VBAP'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'VBEP'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'LIKP'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'LIPS'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'VBRK'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'VBRP'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'EKKO'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'EKPO'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'EKET'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'AUFK'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'AFKO'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'AFPO'     CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'LAGERKOSTEN'  CHANGING lt_ordered.
+  PERFORM append_ordered_sheet USING 'FINANZIERUNG' CHANGING lt_ordered.
 
   LOOP AT gt_sheets ASSIGNING FIELD-SYMBOL(<ls_sheet>).
     READ TABLE lt_ordered TRANSPORTING NO FIELDS
@@ -2618,6 +2741,892 @@ FORM schedule_job.
           |Ueberwachung in SM37, Dateien danach in AL11.| TYPE 'S'.
 
 ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_movement_ranges - Bewegungsarten fuer MATDOC und Stornos
+*&---------------------------------------------------------------------*
+*& Servicelevel-Export: alle Bewegungsarten (leere Range = alle), damit
+*& stoxion Zugaenge (WBZ, Lose), Bestandsverlauf und Verschrottung
+*& rekonstruieren kann. Sonst das bisherige feste Set.
+*&---------------------------------------------------------------------*
+FORM build_movement_ranges USING iv_all_movements TYPE abap_bool
+                           CHANGING ct_bwart        TYPE tt_bwart_range
+                                    ct_storno_bwart TYPE tt_bwart_range.
+
+  IF iv_all_movements = abap_true.
+    CLEAR: ct_bwart, ct_storno_bwart.
+    RETURN.
+  ENDIF.
+
+  PERFORM build_fixed_bwart_range CHANGING ct_bwart.
+  PERFORM build_storno_bwart_range CHANGING ct_storno_bwart.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM check_sheet_rows - Excel-Zeilenlimit fuer Belegreiter pruefen
+*&---------------------------------------------------------------------*
+FORM check_sheet_rows USING iv_name  TYPE string
+                            it_lines TYPE tt_string.
+
+  IF lines( it_lines ) > gc_excel_max_rows.
+    MESSAGE |Reiter { iv_name } ueberschreitet das Excel-Zeilenlimit | &&
+            |({ lines( it_lines ) } Zeilen). Bitte P_MAXROW verkleinern, | &&
+            |damit weniger Materialien je Arbeitsmappe exportiert werden.|
+      TYPE 'E'.
+  ENDIF.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_servicelevel_sheets - Belegdaten fuer den Servicelevel
+*&---------------------------------------------------------------------*
+*& Je Arbeitsmappe (Materialpaket) die Belege, aus denen stoxion
+*& (studien/servicelevel_rohdaten.py) Nachfrage, Ist-Service,
+*& Wiederbeschaffung, Deckungsbeitrag und Bestandswert rekonstruiert:
+*&   MBEWH, VBAK/VBAP/VBEP, LIKP/LIPS, VBRK/VBRP, EKKO/EKPO/EKET,
+*&   AUFK/AFKO/AFPO.
+*& Zeitraum: Nachfragefenster (36 Monate); Bestellungen und
+*& Fertigungsauftraege ein Jahr frueher, damit lange WBZ vollstaendig sind.
+*& Kundennummern werden bewusst nicht exportiert.
+*&---------------------------------------------------------------------*
+FORM build_servicelevel_sheets USING it_marc TYPE tt_marc.
+
+  TYPES: BEGIN OF ty_mbewh,
+           matnr TYPE mbewh-matnr,
+           bwkey TYPE mbewh-bwkey,
+           lfgja TYPE mbewh-lfgja,
+           lfmon TYPE mbewh-lfmon,
+           lbkum TYPE mbewh-lbkum,
+           salk3 TYPE mbewh-salk3,
+           verpr TYPE mbewh-verpr,
+           stprs TYPE mbewh-stprs,
+           peinh TYPE mbewh-peinh,
+           vprsv TYPE mbewh-vprsv,
+         END OF ty_mbewh,
+         BEGIN OF ty_item_key,
+           vbeln TYPE vbeln,
+           posnr TYPE posnr,
+         END OF ty_item_key,
+         BEGIN OF ty_head_key,
+           vbeln TYPE vbeln,
+         END OF ty_head_key,
+         BEGIN OF ty_vbap,
+           vbeln  TYPE vbap-vbeln,
+           posnr  TYPE vbap-posnr,
+           matnr  TYPE vbap-matnr,
+           werks  TYPE vbap-werks,
+           pstyv  TYPE vbap-pstyv,
+           kwmeng TYPE vbap-kwmeng,
+           vrkme  TYPE vbap-vrkme,
+           meins  TYPE vbap-meins,
+           umvkz  TYPE vbap-umvkz,
+           umvkn  TYPE vbap-umvkn,
+           abgru  TYPE vbap-abgru,
+           erdat  TYPE vbap-erdat,
+         END OF ty_vbap,
+         BEGIN OF ty_vbak,
+           vbeln TYPE vbak-vbeln,
+           auart TYPE vbak-auart,
+           erdat TYPE vbak-erdat,
+           audat TYPE vbak-audat,
+           vkorg TYPE vbak-vkorg,
+           vtweg TYPE vbak-vtweg,
+           spart TYPE vbak-spart,
+           augru TYPE vbak-augru,
+         END OF ty_vbak,
+         BEGIN OF ty_vbep,
+           vbeln TYPE vbep-vbeln,
+           posnr TYPE vbep-posnr,
+           etenr TYPE vbep-etenr,
+           edatu TYPE vbep-edatu,
+           wadat TYPE vbep-wadat,
+           mbdat TYPE vbep-mbdat,
+           wmeng TYPE vbep-wmeng,
+           bmeng TYPE vbep-bmeng,
+         END OF ty_vbep,
+         BEGIN OF ty_vbfa,
+           vbelv TYPE vbfa-vbelv,
+           posnv TYPE vbfa-posnv,
+           vbeln TYPE vbfa-vbeln,
+           posnn TYPE vbfa-posnn,
+         END OF ty_vbfa,
+         BEGIN OF ty_lips,
+           vbeln TYPE lips-vbeln,
+           posnr TYPE lips-posnr,
+           vgbel TYPE lips-vgbel,
+           vgpos TYPE lips-vgpos,
+           matnr TYPE lips-matnr,
+           werks TYPE lips-werks,
+           lfimg TYPE lips-lfimg,
+           vrkme TYPE lips-vrkme,
+           lgmng TYPE lips-lgmng,
+           meins TYPE lips-meins,
+         END OF ty_lips,
+         BEGIN OF ty_likp,
+           vbeln     TYPE likp-vbeln,
+           lfart     TYPE likp-lfart,
+           wadat     TYPE likp-wadat,
+           wadat_ist TYPE likp-wadat_ist,
+         END OF ty_likp,
+         BEGIN OF ty_vbrp,
+           vbeln TYPE vbrp-vbeln,
+           posnr TYPE vbrp-posnr,
+           matnr TYPE vbrp-matnr,
+           werks TYPE vbrp-werks,
+           fkimg TYPE vbrp-fkimg,
+           vrkme TYPE vbrp-vrkme,
+           fklmg TYPE vbrp-fklmg,
+           meins TYPE vbrp-meins,
+           umvkz TYPE vbrp-umvkz,
+           umvkn TYPE vbrp-umvkn,
+           netwr TYPE vbrp-netwr,
+           wavwr TYPE vbrp-wavwr,
+           aubel TYPE vbrp-aubel,
+           aupos TYPE vbrp-aupos,
+         END OF ty_vbrp,
+         BEGIN OF ty_vbrk,
+           vbeln TYPE vbrk-vbeln,
+           fkart TYPE vbrk-fkart,
+           vbtyp TYPE vbrk-vbtyp,
+           fkdat TYPE vbrk-fkdat,
+           waerk TYPE vbrk-waerk,
+           kurrf TYPE vbrk-kurrf,
+           fksto TYPE vbrk-fksto,
+           sfakn TYPE vbrk-sfakn,
+         END OF ty_vbrk,
+         BEGIN OF ty_ekpo,
+           ebeln TYPE ekpo-ebeln,
+           ebelp TYPE ekpo-ebelp,
+           matnr TYPE ekpo-matnr,
+           werks TYPE ekpo-werks,
+           menge TYPE ekpo-menge,
+           meins TYPE ekpo-meins,
+           umrez TYPE ekpo-umrez,
+           umren TYPE ekpo-umren,
+           loekz TYPE ekpo-loekz,
+           elikz TYPE ekpo-elikz,
+           bsart TYPE ekko-bsart,
+           bedat TYPE ekko-bedat,
+           aedat TYPE ekko-aedat,
+           lifnr TYPE ekko-lifnr,
+         END OF ty_ekpo,
+         BEGIN OF ty_eket,
+           ebeln TYPE eket-ebeln,
+           ebelp TYPE eket-ebelp,
+           etenr TYPE eket-etenr,
+           eindt TYPE eket-eindt,
+           slfdt TYPE eket-slfdt,
+           menge TYPE eket-menge,
+         END OF ty_eket,
+         BEGIN OF ty_afpo,
+           aufnr TYPE afpo-aufnr,
+           posnr TYPE afpo-posnr,
+           matnr TYPE afpo-matnr,
+           pwerk TYPE afpo-pwerk,
+           psmng TYPE afpo-psmng,
+           wemng TYPE afpo-wemng,
+           meins TYPE afpo-meins,
+           auart TYPE aufk-auart,
+           erdat TYPE aufk-erdat,
+           gstrp TYPE afko-gstrp,
+           gltrp TYPE afko-gltrp,
+           gstri TYPE afko-gstri,
+           gltri TYPE afko-gltri,
+         END OF ty_afpo,
+         BEGIN OF ty_mat_key,
+           matnr TYPE matnr,
+           werks TYPE werks_d,
+         END OF ty_mat_key.
+
+  DATA: lt_mat_keys   TYPE HASHED TABLE OF ty_mat_key WITH UNIQUE KEY matnr werks,
+        lt_matnr      TYPE STANDARD TABLE OF ty_mat_key WITH DEFAULT KEY,
+        lt_mbewh      TYPE STANDARD TABLE OF ty_mbewh WITH DEFAULT KEY,
+        lt_order_keys TYPE STANDARD TABLE OF ty_item_key WITH DEFAULT KEY,
+        lt_bill_keys  TYPE STANDARD TABLE OF ty_item_key WITH DEFAULT KEY,
+        lt_deliv_keys TYPE STANDARD TABLE OF ty_item_key WITH DEFAULT KEY,
+        lt_heads      TYPE STANDARD TABLE OF ty_head_key WITH DEFAULT KEY,
+        lt_vbap       TYPE STANDARD TABLE OF ty_vbap WITH DEFAULT KEY,
+        lt_vbak       TYPE STANDARD TABLE OF ty_vbak WITH DEFAULT KEY,
+        lt_vbep       TYPE STANDARD TABLE OF ty_vbep WITH DEFAULT KEY,
+        lt_vbfa       TYPE STANDARD TABLE OF ty_vbfa WITH DEFAULT KEY,
+        lt_lips       TYPE STANDARD TABLE OF ty_lips WITH DEFAULT KEY,
+        lt_likp       TYPE STANDARD TABLE OF ty_likp WITH DEFAULT KEY,
+        lt_vbrp       TYPE STANDARD TABLE OF ty_vbrp WITH DEFAULT KEY,
+        lt_vbrk       TYPE STANDARD TABLE OF ty_vbrk WITH DEFAULT KEY,
+        lt_ekpo       TYPE STANDARD TABLE OF ty_ekpo WITH DEFAULT KEY,
+        lt_eket       TYPE STANDARD TABLE OF ty_eket WITH DEFAULT KEY,
+        lt_afpo       TYPE STANDARD TABLE OF ty_afpo WITH DEFAULT KEY,
+        lv_start_year TYPE mbewh-lfgja,
+        lv_doc_start  TYPE sy-datum,
+        lv_matnr_out  TYPE string.
+
+  IF it_marc IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  LOOP AT it_marc ASSIGNING FIELD-SYMBOL(<ls_sl_marc>).
+    INSERT VALUE ty_mat_key( matnr = <ls_sl_marc>-matnr
+                             werks = <ls_sl_marc>-werks ) INTO TABLE lt_mat_keys.
+    APPEND VALUE ty_mat_key( matnr = <ls_sl_marc>-matnr ) TO lt_matnr.
+  ENDLOOP.
+  SORT lt_matnr BY matnr.
+  DELETE ADJACENT DUPLICATES FROM lt_matnr COMPARING matnr.
+
+  lv_start_year = gv_hist_start(4).
+  lv_doc_start = gv_hist_start - 365.
+
+* --- MBEWH: Bestandswert je Periode (nur Perioden mit Aenderung) -------
+  SELECT matnr, bwkey, lfgja, lfmon, lbkum, salk3, verpr, stprs, peinh, vprsv
+    FROM mbewh
+    INTO CORRESPONDING FIELDS OF TABLE @lt_mbewh
+    FOR ALL ENTRIES IN @it_marc
+    WHERE matnr = @it_marc-matnr
+      AND bwkey = @it_marc-bwkey
+      AND bwtar = @space
+      AND lfgja >= @lv_start_year.
+  SORT lt_mbewh BY matnr bwkey lfgja lfmon.
+
+  CLEAR gt_lines.
+  APPEND |Materialnummer{ gc_tab }Bewertungskreis{ gc_tab }Geschaeftsjahr{ gc_tab }| &&
+         |Periode{ gc_tab }Gesamtbestand{ gc_tab }Bestandswert{ gc_tab }| &&
+         |Gleitender Durchschnittspreis{ gc_tab }Standardpreis{ gc_tab }| &&
+         |Preiseinheit{ gc_tab }Preissteuerung| TO gt_lines.
+  APPEND |MATNR{ gc_tab }BWKEY{ gc_tab }LFGJA{ gc_tab }LFMON{ gc_tab }LBKUM{ gc_tab }| &&
+         |SALK3{ gc_tab }VERPR{ gc_tab }STPRS{ gc_tab }PEINH{ gc_tab }VPRSV| TO gt_lines.
+  LOOP AT lt_mbewh ASSIGNING FIELD-SYMBOL(<ls_mbewh>).
+    PERFORM matnr_out USING <ls_mbewh>-matnr CHANGING lv_matnr_out.
+    APPEND |{ lv_matnr_out }{ gc_tab }{ <ls_mbewh>-bwkey }{ gc_tab }| &&
+           |{ <ls_mbewh>-lfgja }{ gc_tab }{ <ls_mbewh>-lfmon }{ gc_tab }| &&
+           |{ <ls_mbewh>-lbkum }{ gc_tab }{ <ls_mbewh>-salk3 }{ gc_tab }| &&
+           |{ <ls_mbewh>-verpr }{ gc_tab }{ <ls_mbewh>-stprs }{ gc_tab }| &&
+           |{ <ls_mbewh>-peinh }{ gc_tab }{ <ls_mbewh>-vprsv }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'MBEWH' gt_lines.
+  PERFORM write_sheet USING 'MBEWH' gt_lines.
+
+* --- Kundenauftraege ueber den Materialindex VAPMA ---------------------
+  SELECT vbeln, posnr
+    FROM vapma
+    INTO CORRESPONDING FIELDS OF TABLE @lt_order_keys
+    FOR ALL ENTRIES IN @lt_matnr
+    WHERE matnr = @lt_matnr-matnr
+      AND trvog = '0'
+      AND audat >= @gv_hist_start.
+  SORT lt_order_keys BY vbeln posnr.
+  DELETE ADJACENT DUPLICATES FROM lt_order_keys COMPARING vbeln posnr.
+
+  IF lt_order_keys IS NOT INITIAL.
+    SELECT vbeln, posnr, matnr, werks, pstyv, kwmeng, vrkme, meins,
+           umvkz, umvkn, abgru, erdat
+      FROM vbap
+      INTO CORRESPONDING FIELDS OF TABLE @lt_vbap
+      FOR ALL ENTRIES IN @lt_order_keys
+      WHERE vbeln = @lt_order_keys-vbeln
+        AND posnr = @lt_order_keys-posnr.
+    " Nur Positionen zu exportierten Material/Werk-Kombinationen
+    LOOP AT lt_vbap ASSIGNING FIELD-SYMBOL(<ls_vbap_filter>).
+      IF NOT line_exists( lt_mat_keys[ matnr = <ls_vbap_filter>-matnr
+                                       werks = <ls_vbap_filter>-werks ] ).
+        CLEAR <ls_vbap_filter>-vbeln.
+      ENDIF.
+    ENDLOOP.
+    DELETE lt_vbap WHERE vbeln IS INITIAL.
+  ENDIF.
+
+  IF lt_vbap IS NOT INITIAL.
+    CLEAR lt_heads.
+    LOOP AT lt_vbap ASSIGNING FIELD-SYMBOL(<ls_vbap_head>).
+      APPEND VALUE ty_head_key( vbeln = <ls_vbap_head>-vbeln ) TO lt_heads.
+    ENDLOOP.
+    SORT lt_heads BY vbeln.
+    DELETE ADJACENT DUPLICATES FROM lt_heads COMPARING vbeln.
+
+    SELECT vbeln, auart, erdat, audat, vkorg, vtweg, spart, augru
+      FROM vbak
+      INTO CORRESPONDING FIELDS OF TABLE @lt_vbak
+      FOR ALL ENTRIES IN @lt_heads
+      WHERE vbeln = @lt_heads-vbeln.
+
+    SELECT vbeln, posnr, etenr, edatu, wadat, mbdat, wmeng, bmeng
+      FROM vbep
+      INTO CORRESPONDING FIELDS OF TABLE @lt_vbep
+      FOR ALL ENTRIES IN @lt_vbap
+      WHERE vbeln = @lt_vbap-vbeln
+        AND posnr = @lt_vbap-posnr.
+
+    " Belegfluss Auftrag -> Lieferung (VBTYP_N = J)
+    SELECT vbelv, posnv, vbeln, posnn
+      FROM vbfa
+      INTO CORRESPONDING FIELDS OF TABLE @lt_vbfa
+      FOR ALL ENTRIES IN @lt_vbap
+      WHERE vbelv   = @lt_vbap-vbeln
+        AND posnv   = @lt_vbap-posnr
+        AND vbtyp_n = 'J'.
+  ENDIF.
+
+  IF lt_vbfa IS NOT INITIAL.
+    CLEAR lt_deliv_keys.
+    LOOP AT lt_vbfa ASSIGNING FIELD-SYMBOL(<ls_vbfa>).
+      APPEND VALUE ty_item_key( vbeln = <ls_vbfa>-vbeln
+                                posnr = <ls_vbfa>-posnn ) TO lt_deliv_keys.
+    ENDLOOP.
+    SORT lt_deliv_keys BY vbeln posnr.
+    DELETE ADJACENT DUPLICATES FROM lt_deliv_keys COMPARING vbeln posnr.
+
+    SELECT vbeln, posnr, vgbel, vgpos, matnr, werks, lfimg, vrkme, lgmng, meins
+      FROM lips
+      INTO CORRESPONDING FIELDS OF TABLE @lt_lips
+      FOR ALL ENTRIES IN @lt_deliv_keys
+      WHERE vbeln = @lt_deliv_keys-vbeln
+        AND posnr = @lt_deliv_keys-posnr.
+
+    CLEAR lt_heads.
+    LOOP AT lt_lips ASSIGNING FIELD-SYMBOL(<ls_lips_head>).
+      APPEND VALUE ty_head_key( vbeln = <ls_lips_head>-vbeln ) TO lt_heads.
+    ENDLOOP.
+    SORT lt_heads BY vbeln.
+    DELETE ADJACENT DUPLICATES FROM lt_heads COMPARING vbeln.
+    IF lt_heads IS NOT INITIAL.
+      SELECT vbeln, lfart, wadat, wadat_ist
+        FROM likp
+        INTO CORRESPONDING FIELDS OF TABLE @lt_likp
+        FOR ALL ENTRIES IN @lt_heads
+        WHERE vbeln = @lt_heads-vbeln.
+    ENDIF.
+  ENDIF.
+
+  CLEAR gt_lines.
+  APPEND |Verkaufsbeleg{ gc_tab }Auftragsart{ gc_tab }Angelegt am{ gc_tab }Belegdatum{ gc_tab }| &&
+         |Verkaufsorganisation{ gc_tab }Vertriebsweg{ gc_tab }Sparte{ gc_tab }Auftragsgrund| TO gt_lines.
+  APPEND |VBELN{ gc_tab }AUART{ gc_tab }ERDAT{ gc_tab }AUDAT{ gc_tab }VKORG{ gc_tab }| &&
+         |VTWEG{ gc_tab }SPART{ gc_tab }AUGRU| TO gt_lines.
+  LOOP AT lt_vbak ASSIGNING FIELD-SYMBOL(<ls_vbak>).
+    APPEND |{ <ls_vbak>-vbeln }{ gc_tab }{ <ls_vbak>-auart }{ gc_tab }| &&
+           |{ <ls_vbak>-erdat DATE = RAW }{ gc_tab }{ <ls_vbak>-audat DATE = RAW }{ gc_tab }| &&
+           |{ <ls_vbak>-vkorg }{ gc_tab }{ <ls_vbak>-vtweg }{ gc_tab }| &&
+           |{ <ls_vbak>-spart }{ gc_tab }{ <ls_vbak>-augru }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'VBAK' gt_lines.
+  PERFORM write_sheet USING 'VBAK' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Verkaufsbeleg{ gc_tab }Position{ gc_tab }Materialnummer{ gc_tab }Werk{ gc_tab }| &&
+         |Positionstyp{ gc_tab }Auftragsmenge (VME){ gc_tab }Verkaufsmengeneinheit{ gc_tab }| &&
+         |Basismengeneinheit{ gc_tab }Umrechnung Zaehler{ gc_tab }Umrechnung Nenner{ gc_tab }| &&
+         |Absagegrund{ gc_tab }Angelegt am| TO gt_lines.
+  APPEND |VBELN{ gc_tab }POSNR{ gc_tab }MATNR{ gc_tab }WERKS{ gc_tab }PSTYV{ gc_tab }| &&
+         |KWMENG{ gc_tab }VRKME{ gc_tab }MEINS{ gc_tab }UMVKZ{ gc_tab }UMVKN{ gc_tab }| &&
+         |ABGRU{ gc_tab }ERDAT| TO gt_lines.
+  LOOP AT lt_vbap ASSIGNING FIELD-SYMBOL(<ls_vbap>).
+    PERFORM matnr_out USING <ls_vbap>-matnr CHANGING lv_matnr_out.
+    APPEND |{ <ls_vbap>-vbeln }{ gc_tab }{ <ls_vbap>-posnr }{ gc_tab }| &&
+           |{ lv_matnr_out }{ gc_tab }{ <ls_vbap>-werks }{ gc_tab }| &&
+           |{ <ls_vbap>-pstyv }{ gc_tab }{ <ls_vbap>-kwmeng }{ gc_tab }| &&
+           |{ <ls_vbap>-vrkme }{ gc_tab }{ <ls_vbap>-meins }{ gc_tab }| &&
+           |{ <ls_vbap>-umvkz }{ gc_tab }{ <ls_vbap>-umvkn }{ gc_tab }| &&
+           |{ <ls_vbap>-abgru }{ gc_tab }{ <ls_vbap>-erdat DATE = RAW }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'VBAP' gt_lines.
+  PERFORM write_sheet USING 'VBAP' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Verkaufsbeleg{ gc_tab }Position{ gc_tab }Einteilung{ gc_tab }Lieferdatum{ gc_tab }| &&
+         |Warenausgangsdatum{ gc_tab }Materialbereitstellungsdatum{ gc_tab }| &&
+         |Wunschmenge (VME){ gc_tab }Bestaetigte Menge (VME)| TO gt_lines.
+  APPEND |VBELN{ gc_tab }POSNR{ gc_tab }ETENR{ gc_tab }EDATU{ gc_tab }WADAT{ gc_tab }| &&
+         |MBDAT{ gc_tab }WMENG{ gc_tab }BMENG| TO gt_lines.
+  LOOP AT lt_vbep ASSIGNING FIELD-SYMBOL(<ls_vbep>).
+    APPEND |{ <ls_vbep>-vbeln }{ gc_tab }{ <ls_vbep>-posnr }{ gc_tab }| &&
+           |{ <ls_vbep>-etenr }{ gc_tab }{ <ls_vbep>-edatu DATE = RAW }{ gc_tab }| &&
+           |{ <ls_vbep>-wadat DATE = RAW }{ gc_tab }{ <ls_vbep>-mbdat DATE = RAW }{ gc_tab }| &&
+           |{ <ls_vbep>-wmeng }{ gc_tab }{ <ls_vbep>-bmeng }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'VBEP' gt_lines.
+  PERFORM write_sheet USING 'VBEP' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Lieferung{ gc_tab }Lieferart{ gc_tab }Geplanter Warenausgang{ gc_tab }| &&
+         |Tatsaechlicher Warenausgang| TO gt_lines.
+  APPEND |VBELN{ gc_tab }LFART{ gc_tab }WADAT{ gc_tab }WADAT_IST| TO gt_lines.
+  LOOP AT lt_likp ASSIGNING FIELD-SYMBOL(<ls_likp>).
+    APPEND |{ <ls_likp>-vbeln }{ gc_tab }{ <ls_likp>-lfart }{ gc_tab }| &&
+           |{ <ls_likp>-wadat DATE = RAW }{ gc_tab }{ <ls_likp>-wadat_ist DATE = RAW }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'LIKP' gt_lines.
+  PERFORM write_sheet USING 'LIKP' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Lieferung{ gc_tab }Position{ gc_tab }Vorgaengerbeleg{ gc_tab }Vorgaengerposition{ gc_tab }| &&
+         |Materialnummer{ gc_tab }Werk{ gc_tab }Liefermenge (VME){ gc_tab }Verkaufsmengeneinheit{ gc_tab }| &&
+         |Liefermenge (Basis-ME){ gc_tab }Basismengeneinheit| TO gt_lines.
+  APPEND |VBELN{ gc_tab }POSNR{ gc_tab }VGBEL{ gc_tab }VGPOS{ gc_tab }MATNR{ gc_tab }WERKS{ gc_tab }| &&
+         |LFIMG{ gc_tab }VRKME{ gc_tab }LGMNG{ gc_tab }MEINS| TO gt_lines.
+  LOOP AT lt_lips ASSIGNING FIELD-SYMBOL(<ls_lips>).
+    PERFORM matnr_out USING <ls_lips>-matnr CHANGING lv_matnr_out.
+    APPEND |{ <ls_lips>-vbeln }{ gc_tab }{ <ls_lips>-posnr }{ gc_tab }| &&
+           |{ <ls_lips>-vgbel }{ gc_tab }{ <ls_lips>-vgpos }{ gc_tab }| &&
+           |{ lv_matnr_out }{ gc_tab }{ <ls_lips>-werks }{ gc_tab }| &&
+           |{ <ls_lips>-lfimg }{ gc_tab }{ <ls_lips>-vrkme }{ gc_tab }| &&
+           |{ <ls_lips>-lgmng }{ gc_tab }{ <ls_lips>-meins }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'LIPS' gt_lines.
+  PERFORM write_sheet USING 'LIPS' gt_lines.
+
+* --- Fakturen ueber den Materialindex VRPMA ----------------------------
+  SELECT vbeln, posnr
+    FROM vrpma
+    INTO CORRESPONDING FIELDS OF TABLE @lt_bill_keys
+    FOR ALL ENTRIES IN @lt_matnr
+    WHERE matnr = @lt_matnr-matnr
+      AND fkdat >= @gv_hist_start.
+  SORT lt_bill_keys BY vbeln posnr.
+  DELETE ADJACENT DUPLICATES FROM lt_bill_keys COMPARING vbeln posnr.
+
+  IF lt_bill_keys IS NOT INITIAL.
+    SELECT vbeln, posnr, matnr, werks, fkimg, vrkme, fklmg, meins, umvkz, umvkn,
+           netwr, wavwr, aubel, aupos
+      FROM vbrp
+      INTO CORRESPONDING FIELDS OF TABLE @lt_vbrp
+      FOR ALL ENTRIES IN @lt_bill_keys
+      WHERE vbeln = @lt_bill_keys-vbeln
+        AND posnr = @lt_bill_keys-posnr.
+    LOOP AT lt_vbrp ASSIGNING FIELD-SYMBOL(<ls_vbrp_filter>).
+      IF NOT line_exists( lt_mat_keys[ matnr = <ls_vbrp_filter>-matnr
+                                       werks = <ls_vbrp_filter>-werks ] ).
+        CLEAR <ls_vbrp_filter>-vbeln.
+      ENDIF.
+    ENDLOOP.
+    DELETE lt_vbrp WHERE vbeln IS INITIAL.
+  ENDIF.
+
+  IF lt_vbrp IS NOT INITIAL.
+    CLEAR lt_heads.
+    LOOP AT lt_vbrp ASSIGNING FIELD-SYMBOL(<ls_vbrp_head>).
+      APPEND VALUE ty_head_key( vbeln = <ls_vbrp_head>-vbeln ) TO lt_heads.
+    ENDLOOP.
+    SORT lt_heads BY vbeln.
+    DELETE ADJACENT DUPLICATES FROM lt_heads COMPARING vbeln.
+    SELECT vbeln, fkart, vbtyp, fkdat, waerk, kurrf, fksto, sfakn
+      FROM vbrk
+      INTO CORRESPONDING FIELDS OF TABLE @lt_vbrk
+      FOR ALL ENTRIES IN @lt_heads
+      WHERE vbeln = @lt_heads-vbeln.
+  ENDIF.
+
+  CLEAR gt_lines.
+  APPEND |Faktura{ gc_tab }Fakturaart{ gc_tab }Vertriebsbelegtyp{ gc_tab }Fakturadatum{ gc_tab }| &&
+         |Belegwaehrung{ gc_tab }Wechselkurs{ gc_tab }Storniert{ gc_tab }Stornierte Faktura| TO gt_lines.
+  APPEND |VBELN{ gc_tab }FKART{ gc_tab }VBTYP{ gc_tab }FKDAT{ gc_tab }WAERK{ gc_tab }| &&
+         |KURRF{ gc_tab }FKSTO{ gc_tab }SFAKN| TO gt_lines.
+  LOOP AT lt_vbrk ASSIGNING FIELD-SYMBOL(<ls_vbrk>).
+    APPEND |{ <ls_vbrk>-vbeln }{ gc_tab }{ <ls_vbrk>-fkart }{ gc_tab }| &&
+           |{ <ls_vbrk>-vbtyp }{ gc_tab }{ <ls_vbrk>-fkdat DATE = RAW }{ gc_tab }| &&
+           |{ <ls_vbrk>-waerk }{ gc_tab }{ <ls_vbrk>-kurrf }{ gc_tab }| &&
+           |{ <ls_vbrk>-fksto }{ gc_tab }{ <ls_vbrk>-sfakn }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'VBRK' gt_lines.
+  PERFORM write_sheet USING 'VBRK' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Faktura{ gc_tab }Position{ gc_tab }Materialnummer{ gc_tab }Werk{ gc_tab }| &&
+         |Fakturamenge (VME){ gc_tab }Verkaufsmengeneinheit{ gc_tab }Fakturamenge (Basis-ME){ gc_tab }| &&
+         |Basismengeneinheit{ gc_tab }Umrechnung Zaehler{ gc_tab }Umrechnung Nenner{ gc_tab }| &&
+         |Nettowert{ gc_tab }Wareneinsatz{ gc_tab }Auftrag{ gc_tab }Auftragsposition| TO gt_lines.
+  APPEND |VBELN{ gc_tab }POSNR{ gc_tab }MATNR{ gc_tab }WERKS{ gc_tab }FKIMG{ gc_tab }VRKME{ gc_tab }| &&
+         |FKLMG{ gc_tab }MEINS{ gc_tab }UMVKZ{ gc_tab }UMVKN{ gc_tab }NETWR{ gc_tab }WAVWR{ gc_tab }| &&
+         |AUBEL{ gc_tab }AUPOS| TO gt_lines.
+  LOOP AT lt_vbrp ASSIGNING FIELD-SYMBOL(<ls_vbrp>).
+    PERFORM matnr_out USING <ls_vbrp>-matnr CHANGING lv_matnr_out.
+    APPEND |{ <ls_vbrp>-vbeln }{ gc_tab }{ <ls_vbrp>-posnr }{ gc_tab }| &&
+           |{ lv_matnr_out }{ gc_tab }{ <ls_vbrp>-werks }{ gc_tab }| &&
+           |{ <ls_vbrp>-fkimg }{ gc_tab }{ <ls_vbrp>-vrkme }{ gc_tab }| &&
+           |{ <ls_vbrp>-fklmg }{ gc_tab }{ <ls_vbrp>-meins }{ gc_tab }| &&
+           |{ <ls_vbrp>-umvkz }{ gc_tab }{ <ls_vbrp>-umvkn }{ gc_tab }| &&
+           |{ <ls_vbrp>-netwr }{ gc_tab }{ <ls_vbrp>-wavwr }{ gc_tab }| &&
+           |{ <ls_vbrp>-aubel }{ gc_tab }{ <ls_vbrp>-aupos }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'VBRP' gt_lines.
+  PERFORM write_sheet USING 'VBRP' gt_lines.
+
+* --- Bestellungen (Fremdbezug) ------------------------------------------
+  SELECT p~ebeln, p~ebelp, p~matnr, p~werks, p~menge, p~meins, p~umrez, p~umren,
+         p~loekz, p~elikz, k~bsart, k~bedat, k~aedat, k~lifnr
+    FROM ekpo AS p
+    INNER JOIN ekko AS k ON k~ebeln = p~ebeln
+    INTO CORRESPONDING FIELDS OF TABLE @lt_ekpo
+    FOR ALL ENTRIES IN @it_marc
+    WHERE p~matnr = @it_marc-matnr
+      AND p~werks = @it_marc-werks
+      AND k~bstyp = 'F'
+      AND k~bedat >= @lv_doc_start.
+  SORT lt_ekpo BY ebeln ebelp.
+  DELETE ADJACENT DUPLICATES FROM lt_ekpo COMPARING ebeln ebelp.
+
+  IF lt_ekpo IS NOT INITIAL.
+    SELECT ebeln, ebelp, etenr, eindt, slfdt, menge
+      FROM eket
+      INTO CORRESPONDING FIELDS OF TABLE @lt_eket
+      FOR ALL ENTRIES IN @lt_ekpo
+      WHERE ebeln = @lt_ekpo-ebeln
+        AND ebelp = @lt_ekpo-ebelp.
+  ENDIF.
+
+  CLEAR gt_lines.
+  APPEND |Einkaufsbeleg{ gc_tab }Belegart{ gc_tab }Belegdatum{ gc_tab }Angelegt am{ gc_tab }| &&
+         |Lieferant| TO gt_lines.
+  APPEND |EBELN{ gc_tab }BSART{ gc_tab }BEDAT{ gc_tab }AEDAT{ gc_tab }LIFNR| TO gt_lines.
+  DATA(lt_ekko_out) = lt_ekpo.
+  SORT lt_ekko_out BY ebeln.
+  DELETE ADJACENT DUPLICATES FROM lt_ekko_out COMPARING ebeln.
+  LOOP AT lt_ekko_out ASSIGNING FIELD-SYMBOL(<ls_ekko>).
+    APPEND |{ <ls_ekko>-ebeln }{ gc_tab }{ <ls_ekko>-bsart }{ gc_tab }| &&
+           |{ <ls_ekko>-bedat DATE = RAW }{ gc_tab }{ <ls_ekko>-aedat DATE = RAW }{ gc_tab }| &&
+           |{ <ls_ekko>-lifnr }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'EKKO' gt_lines.
+  PERFORM write_sheet USING 'EKKO' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Einkaufsbeleg{ gc_tab }Position{ gc_tab }Materialnummer{ gc_tab }Werk{ gc_tab }| &&
+         |Bestellmenge (BME){ gc_tab }Bestellmengeneinheit{ gc_tab }Umrechnung Zaehler{ gc_tab }| &&
+         |Umrechnung Nenner{ gc_tab }Loeschkennzeichen{ gc_tab }Endlieferung| TO gt_lines.
+  APPEND |EBELN{ gc_tab }EBELP{ gc_tab }MATNR{ gc_tab }WERKS{ gc_tab }MENGE{ gc_tab }MEINS{ gc_tab }| &&
+         |UMREZ{ gc_tab }UMREN{ gc_tab }LOEKZ{ gc_tab }ELIKZ| TO gt_lines.
+  LOOP AT lt_ekpo ASSIGNING FIELD-SYMBOL(<ls_ekpo>).
+    PERFORM matnr_out USING <ls_ekpo>-matnr CHANGING lv_matnr_out.
+    APPEND |{ <ls_ekpo>-ebeln }{ gc_tab }{ <ls_ekpo>-ebelp }{ gc_tab }| &&
+           |{ lv_matnr_out }{ gc_tab }{ <ls_ekpo>-werks }{ gc_tab }| &&
+           |{ <ls_ekpo>-menge }{ gc_tab }{ <ls_ekpo>-meins }{ gc_tab }| &&
+           |{ <ls_ekpo>-umrez }{ gc_tab }{ <ls_ekpo>-umren }{ gc_tab }| &&
+           |{ <ls_ekpo>-loekz }{ gc_tab }{ <ls_ekpo>-elikz }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'EKPO' gt_lines.
+  PERFORM write_sheet USING 'EKPO' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Einkaufsbeleg{ gc_tab }Position{ gc_tab }Einteilung{ gc_tab }Lieferdatum{ gc_tab }| &&
+         |Statistisches Lieferdatum{ gc_tab }Einteilungsmenge| TO gt_lines.
+  APPEND |EBELN{ gc_tab }EBELP{ gc_tab }ETENR{ gc_tab }EINDT{ gc_tab }SLFDT{ gc_tab }MENGE| TO gt_lines.
+  LOOP AT lt_eket ASSIGNING FIELD-SYMBOL(<ls_eket>).
+    APPEND |{ <ls_eket>-ebeln }{ gc_tab }{ <ls_eket>-ebelp }{ gc_tab }| &&
+           |{ <ls_eket>-etenr }{ gc_tab }{ <ls_eket>-eindt DATE = RAW }{ gc_tab }| &&
+           |{ <ls_eket>-slfdt DATE = RAW }{ gc_tab }{ <ls_eket>-menge }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'EKET' gt_lines.
+  PERFORM write_sheet USING 'EKET' gt_lines.
+
+* --- Fertigungsauftraege (Eigenfertigung) -------------------------------
+  SELECT p~aufnr, p~posnr, p~matnr, p~pwerk, p~psmng, p~wemng, p~meins,
+         a~auart, a~erdat, k~gstrp, k~gltrp, k~gstri, k~gltri
+    FROM afpo AS p
+    INNER JOIN aufk AS a ON a~aufnr = p~aufnr
+    INNER JOIN afko AS k ON k~aufnr = p~aufnr
+    INTO CORRESPONDING FIELDS OF TABLE @lt_afpo
+    FOR ALL ENTRIES IN @it_marc
+    WHERE p~matnr = @it_marc-matnr
+      AND p~pwerk = @it_marc-werks
+      AND a~erdat >= @lv_doc_start.
+  SORT lt_afpo BY aufnr posnr.
+  DELETE ADJACENT DUPLICATES FROM lt_afpo COMPARING aufnr posnr.
+
+  CLEAR gt_lines.
+  APPEND |Auftrag{ gc_tab }Auftragsart{ gc_tab }Angelegt am{ gc_tab }Werk| TO gt_lines.
+  APPEND |AUFNR{ gc_tab }AUART{ gc_tab }ERDAT{ gc_tab }WERKS| TO gt_lines.
+  DATA(lt_aufk_out) = lt_afpo.
+  SORT lt_aufk_out BY aufnr.
+  DELETE ADJACENT DUPLICATES FROM lt_aufk_out COMPARING aufnr.
+  LOOP AT lt_aufk_out ASSIGNING FIELD-SYMBOL(<ls_aufk>).
+    APPEND |{ <ls_aufk>-aufnr }{ gc_tab }{ <ls_aufk>-auart }{ gc_tab }| &&
+           |{ <ls_aufk>-erdat DATE = RAW }{ gc_tab }{ <ls_aufk>-pwerk }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'AUFK' gt_lines.
+  PERFORM write_sheet USING 'AUFK' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Auftrag{ gc_tab }Eckstarttermin{ gc_tab }Eckendtermin{ gc_tab }| &&
+         |Iststart{ gc_tab }Istende| TO gt_lines.
+  APPEND |AUFNR{ gc_tab }GSTRP{ gc_tab }GLTRP{ gc_tab }GSTRI{ gc_tab }GLTRI| TO gt_lines.
+  LOOP AT lt_aufk_out ASSIGNING FIELD-SYMBOL(<ls_afko>).
+    APPEND |{ <ls_afko>-aufnr }{ gc_tab }{ <ls_afko>-gstrp DATE = RAW }{ gc_tab }| &&
+           |{ <ls_afko>-gltrp DATE = RAW }{ gc_tab }{ <ls_afko>-gstri DATE = RAW }{ gc_tab }| &&
+           |{ <ls_afko>-gltri DATE = RAW }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'AFKO' gt_lines.
+  PERFORM write_sheet USING 'AFKO' gt_lines.
+
+  CLEAR gt_lines.
+  APPEND |Auftrag{ gc_tab }Position{ gc_tab }Materialnummer{ gc_tab }Werk{ gc_tab }| &&
+         |Auftragsmenge{ gc_tab }Gelieferte Menge{ gc_tab }Basismengeneinheit| TO gt_lines.
+  APPEND |AUFNR{ gc_tab }POSNR{ gc_tab }MATNR{ gc_tab }PWERK{ gc_tab }PSMNG{ gc_tab }| &&
+         |WEMNG{ gc_tab }MEINS| TO gt_lines.
+  LOOP AT lt_afpo ASSIGNING FIELD-SYMBOL(<ls_afpo>).
+    PERFORM matnr_out USING <ls_afpo>-matnr CHANGING lv_matnr_out.
+    APPEND |{ <ls_afpo>-aufnr }{ gc_tab }{ <ls_afpo>-posnr }{ gc_tab }| &&
+           |{ lv_matnr_out }{ gc_tab }{ <ls_afpo>-pwerk }{ gc_tab }| &&
+           |{ <ls_afpo>-psmng }{ gc_tab }{ <ls_afpo>-wemng }{ gc_tab }| &&
+           |{ <ls_afpo>-meins }| TO gt_lines.
+  ENDLOOP.
+  PERFORM check_sheet_rows USING 'AFPO' gt_lines.
+  PERFORM write_sheet USING 'AFPO' gt_lines.
+
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*& FORM build_company_sheets - Lagerkosten und Finanzierung (einmalig)
+*&---------------------------------------------------------------------*
+*& LAGERKOSTEN
+*&   EXTERN: Rechnungen/Gutschriften der Lieferanten externer Laeger
+*&           (S_LGLIF, Belegarten S_LGBLA; Zahlungen nicht) aus BSIK/BSAK,
+*&           netto = DMBTR - MWSTS, Gutschrift negativ.
+*&   INTERN: Soll-Buchungen auf Lagerkostenstellen (S_LGKST) aus ACDOCA,
+*&           Ledger 0L. Entlastungen werden nicht abgezogen; INTERN ist in
+*&           stoxion nur die Obergrenze der Lagerkosten.
+*& FINANZIERUNG (optional, S_ZINSK/S_GEBK/S_KREDK)
+*&   Zinsaufwand und Kreditgebuehren je Monat, verzinsliche
+*&   Verbindlichkeiten als Periodenendsaldo (inkl. Saldovortrag POPER 000).
+*&   Annahme: Geschaeftsjahr = Kalenderjahr (Periode = Monat).
+*&   Ohne diese Konten nutzt stoxion allein den Bundesbank-Zins.
+*&---------------------------------------------------------------------*
+FORM build_company_sheets USING it_plants TYPE tt_plant.
+
+  TYPES: BEGIN OF ty_vendor_item,
+           bukrs TYPE bsik-bukrs,
+           lifnr TYPE bsik-lifnr,
+           gjahr TYPE bsik-gjahr,
+           belnr TYPE bsik-belnr,
+           buzei TYPE bsik-buzei,
+           budat TYPE bsik-budat,
+           blart TYPE bsik-blart,
+           shkzg TYPE bsik-shkzg,
+           dmbtr TYPE bsik-dmbtr,
+           mwsts TYPE bsik-mwsts,
+         END OF ty_vendor_item,
+         BEGIN OF ty_gl_line,
+           rbukrs TYPE bukrs,
+           racct  TYPE saknr,
+           rcntr  TYPE kostl,
+           gjahr  TYPE gjahr,
+           poper  TYPE n LENGTH 3,
+           budat  TYPE budat,
+           belnr  TYPE belnr_d,
+           hsl    TYPE p LENGTH 15 DECIMALS 2,
+         END OF ty_gl_line,
+         BEGIN OF ty_month,
+           year     TYPE gjahr,
+           month    TYPE n LENGTH 2,
+           interest TYPE p LENGTH 15 DECIMALS 2,
+           fees     TYPE p LENGTH 15 DECIMALS 2,
+           debt     TYPE p LENGTH 15 DECIMALS 2,
+         END OF ty_month,
+         tt_bukrs_range TYPE RANGE OF bukrs,
+         tt_racct_range TYPE RANGE OF saknr.
+
+  DATA: lt_bukrs    TYPE tt_bukrs_range,
+        lt_vendor   TYPE STANDARD TABLE OF ty_vendor_item WITH DEFAULT KEY,
+        lt_gl       TYPE STANDARD TABLE OF ty_gl_line WITH DEFAULT KEY,
+        lt_months   TYPE SORTED TABLE OF ty_month WITH UNIQUE KEY year month,
+        lt_racct    TYPE tt_racct_range,
+        ls_month    TYPE ty_month,
+        lv_to       TYPE sy-datum,
+        lv_amount   TYPE p LENGTH 15 DECIMALS 2,
+        lv_tabname  TYPE string VALUE 'ACDOCA',
+        lv_year     TYPE gjahr,
+        lv_from_yr  TYPE gjahr,
+        lv_to_yr    TYPE gjahr,
+        lv_period   TYPE i,
+        lv_month_n  TYPE n LENGTH 2,
+        lv_month_id TYPE c LENGTH 6.
+
+  LOOP AT it_plants ASSIGNING FIELD-SYMBOL(<ls_company>).
+    APPEND VALUE #( sign = 'I' option = 'EQ' low = <ls_company>-bukrs ) TO lt_bukrs.
+  ENDLOOP.
+  SORT lt_bukrs BY low.
+  DELETE ADJACENT DUPLICATES FROM lt_bukrs COMPARING low.
+  lv_to = gv_hist_end - 1.
+
+* --- LAGERKOSTEN -----------------------------------------------------------
+  CLEAR gt_lines.
+  APPEND |Lagertyp{ gc_tab }Buchungskreis{ gc_tab }Lieferant{ gc_tab }Kostenstelle{ gc_tab }| &&
+         |Sachkonto{ gc_tab }Buchungsdatum{ gc_tab }Betrag netto (Hauswaehrung){ gc_tab }Beleg| TO gt_lines.
+  APPEND |LAGERTYP{ gc_tab }BUKRS{ gc_tab }LIFNR{ gc_tab }RCNTR{ gc_tab }RACCT{ gc_tab }| &&
+         |BUDAT{ gc_tab }BETRAG{ gc_tab }BELNR| TO gt_lines.
+
+  IF s_lglif[] IS NOT INITIAL.
+    SELECT bukrs, lifnr, gjahr, belnr, buzei, budat, blart, shkzg, dmbtr, mwsts
+      FROM bsik
+      INTO CORRESPONDING FIELDS OF TABLE @lt_vendor
+      WHERE bukrs IN @lt_bukrs
+        AND lifnr IN @s_lglif
+        AND blart IN @s_lgbla
+        AND budat BETWEEN @gv_hist_start AND @lv_to.
+    SELECT bukrs, lifnr, gjahr, belnr, buzei, budat, blart, shkzg, dmbtr, mwsts
+      FROM bsak
+      APPENDING CORRESPONDING FIELDS OF TABLE @lt_vendor
+      WHERE bukrs IN @lt_bukrs
+        AND lifnr IN @s_lglif
+        AND blart IN @s_lgbla
+        AND budat BETWEEN @gv_hist_start AND @lv_to.
+    SORT lt_vendor BY bukrs gjahr belnr buzei.
+    DELETE ADJACENT DUPLICATES FROM lt_vendor COMPARING bukrs gjahr belnr buzei.
+
+    LOOP AT lt_vendor ASSIGNING FIELD-SYMBOL(<ls_vendor>).
+      lv_amount = <ls_vendor>-dmbtr - <ls_vendor>-mwsts.
+      IF <ls_vendor>-shkzg = 'S'.          "Soll beim Kreditor = Gutschrift
+        lv_amount = - lv_amount.
+      ENDIF.
+      APPEND |EXTERN{ gc_tab }{ <ls_vendor>-bukrs }{ gc_tab }{ <ls_vendor>-lifnr }{ gc_tab }| &&
+             |{ gc_tab }{ gc_tab }{ <ls_vendor>-budat DATE = RAW }{ gc_tab }| &&
+             |{ lv_amount }{ gc_tab }{ <ls_vendor>-belnr }| TO gt_lines.
+    ENDLOOP.
+  ENDIF.
+
+  IF s_lgkst[] IS NOT INITIAL.
+    TRY.
+        SELECT rbukrs, racct, rcntr, gjahr, poper, budat, belnr, hsl
+          FROM (lv_tabname)
+          INTO CORRESPONDING FIELDS OF TABLE @lt_gl
+          WHERE rldnr  = '0L'
+            AND rbukrs IN @lt_bukrs
+            AND rcntr  IN @s_lgkst
+            AND budat BETWEEN @gv_hist_start AND @lv_to
+            AND hsl    > 0.
+      CATCH cx_sy_dynamic_osql_error INTO DATA(lx_acdoca_cc).
+        MESSAGE |ACDOCA nicht lesbar, interne Lagerkosten fehlen: { lx_acdoca_cc->get_text( ) }|
+          TYPE 'S' DISPLAY LIKE 'W'.
+    ENDTRY.
+    LOOP AT lt_gl ASSIGNING FIELD-SYMBOL(<ls_cc>).
+      APPEND |INTERN{ gc_tab }{ <ls_cc>-rbukrs }{ gc_tab }{ gc_tab }{ <ls_cc>-rcntr }{ gc_tab }| &&
+             |{ <ls_cc>-racct }{ gc_tab }{ <ls_cc>-budat DATE = RAW }{ gc_tab }| &&
+             |{ <ls_cc>-hsl }{ gc_tab }{ <ls_cc>-belnr }| TO gt_lines.
+    ENDLOOP.
+  ENDIF.
+  PERFORM check_sheet_rows USING 'LAGERKOSTEN' gt_lines.
+  PERFORM write_sheet USING 'LAGERKOSTEN' gt_lines.
+
+* --- FINANZIERUNG (optional) --------------------------------------------
+  IF s_zinsk[] IS INITIAL OR s_kredk[] IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  lv_from_yr = gv_hist_start(4).
+  lv_to_yr   = lv_to(4).
+  " Gemeinsame Kontenliste: eine leere Option darf nicht 'alle Konten' bedeuten.
+  APPEND LINES OF s_zinsk[] TO lt_racct.
+  APPEND LINES OF s_gebk[] TO lt_racct.
+  APPEND LINES OF s_kredk[] TO lt_racct.
+  CLEAR lt_gl.
+  TRY.
+      SELECT rbukrs, racct, gjahr, poper, hsl
+        FROM (lv_tabname)
+        INTO CORRESPONDING FIELDS OF TABLE @lt_gl
+        WHERE rldnr  = '0L'
+          AND rbukrs IN @lt_bukrs
+          AND gjahr BETWEEN @lv_from_yr AND @lv_to_yr
+          AND racct IN @lt_racct.
+    CATCH cx_sy_dynamic_osql_error INTO DATA(lx_acdoca_fin).
+      MESSAGE |ACDOCA nicht lesbar, Finanzierung fehlt: { lx_acdoca_fin->get_text( ) }|
+        TYPE 'S' DISPLAY LIKE 'W'.
+      RETURN.
+  ENDTRY.
+
+  " Monatsraster des Fensters anlegen
+  lv_year = lv_from_yr.
+  WHILE lv_year <= lv_to_yr.
+    DO 12 TIMES.
+      lv_month_n = sy-index.
+      lv_month_id = |{ lv_year }{ lv_month_n }|.
+      IF lv_month_id >= gv_hist_start(6) AND lv_month_id <= lv_to(6).
+        INSERT VALUE ty_month( year = lv_year month = lv_month_n ) INTO TABLE lt_months.
+      ENDIF.
+    ENDDO.
+    lv_year = lv_year + 1.
+  ENDWHILE.
+
+  LOOP AT lt_gl ASSIGNING FIELD-SYMBOL(<ls_fin>).
+    lv_period = <ls_fin>-poper.
+    IF lv_period > 12.                    "Sonderperioden zum Dezember
+      lv_period = 12.
+    ENDIF.
+    IF <ls_fin>-racct IN s_kredk.
+      " Periodenendsaldo: alle Buchungen des Jahres bis einschliesslich Periode
+      " (Saldovortrag POPER 000 inklusive) wirken auf alle spaeteren Monate.
+      LOOP AT lt_months ASSIGNING FIELD-SYMBOL(<ls_debt_month>)
+           WHERE year = <ls_fin>-gjahr.
+        IF <ls_debt_month>-month >= lv_period.
+          <ls_debt_month>-debt = <ls_debt_month>-debt - <ls_fin>-hsl. "Haben = positiv
+        ENDIF.
+      ENDLOOP.
+    ELSEIF lv_period >= 1.
+      lv_month_n = lv_period.
+      READ TABLE lt_months ASSIGNING FIELD-SYMBOL(<ls_flow_month>)
+        WITH TABLE KEY year = <ls_fin>-gjahr month = lv_month_n.
+      IF sy-subrc = 0.
+        IF <ls_fin>-racct IN s_zinsk.
+          <ls_flow_month>-interest = <ls_flow_month>-interest + <ls_fin>-hsl.
+        ELSE.
+          <ls_flow_month>-fees = <ls_flow_month>-fees + <ls_fin>-hsl.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  CLEAR gt_lines.
+  APPEND |Periode (JJJJ-MM){ gc_tab }Zinsaufwand{ gc_tab }Kreditgebuehren{ gc_tab }| &&
+         |Verzinsliche Verbindlichkeiten (Monatsende)| TO gt_lines.
+  APPEND |PERIODE{ gc_tab }ZINSAUFWAND{ gc_tab }KREDITGEBUEHREN{ gc_tab }| &&
+         |VERZINSLICHE_VERBINDLICHKEITEN| TO gt_lines.
+  LOOP AT lt_months INTO ls_month.
+    APPEND |{ ls_month-year }-{ ls_month-month }{ gc_tab }| &&
+           |{ ls_month-interest }{ gc_tab }{ ls_month-fees }{ gc_tab }| &&
+           |{ ls_month-debt }| TO gt_lines.
+  ENDLOOP.
+  PERFORM write_sheet USING 'FINANZIERUNG' gt_lines.
+
+ENDFORM.
+
+CLASS ltcl_movement_ranges DEFINITION FINAL FOR TESTING
+  DURATION SHORT
+  RISK LEVEL HARMLESS.
+  PRIVATE SECTION.
+    METHODS servicelevel_exports_all_bwart FOR TESTING.
+    METHODS default_keeps_fixed_bwart_set FOR TESTING.
+ENDCLASS.
+
+CLASS ltcl_movement_ranges IMPLEMENTATION.
+
+  METHOD servicelevel_exports_all_bwart.
+    DATA: lt_bwart  TYPE tt_bwart_range,
+          lt_storno TYPE tt_bwart_range.
+
+    PERFORM build_movement_ranges USING abap_true
+                                  CHANGING lt_bwart lt_storno.
+
+    cl_abap_unit_assert=>assert_initial(
+      act = lt_bwart
+      msg = 'Servicelevel-Export: leere Range = alle Bewegungsarten (Zugaenge!).' ).
+    cl_abap_unit_assert=>assert_initial(
+      act = lt_storno
+      msg = 'Servicelevel-Export: Stornos aller Bewegungsarten.' ).
+  ENDMETHOD.
+
+  METHOD default_keeps_fixed_bwart_set.
+    DATA: lt_bwart  TYPE tt_bwart_range,
+          lt_storno TYPE tt_bwart_range.
+
+    PERFORM build_movement_ranges USING abap_false
+                                  CHANGING lt_bwart lt_storno.
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = 13
+      act = lines( lt_bwart )
+      msg = 'Ohne Servicelevel-Export bleibt das feste Bewegungsarten-Set.' ).
+    cl_abap_unit_assert=>assert_false(
+      act = xsdbool( line_exists( lt_bwart[ low = '101' ] ) )
+      msg = 'Das feste Set enthaelt keine Zugaenge.' ).
+  ENDMETHOD.
+
+ENDCLASS.
 
 CLASS ltcl_demand_history DEFINITION FINAL FOR TESTING
   DURATION SHORT
